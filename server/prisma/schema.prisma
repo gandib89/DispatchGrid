@@ -1,0 +1,10 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Domain models are introduced in C02 after the identity and tenancy
+// decisions in Dispatch_plan.md have been completed.

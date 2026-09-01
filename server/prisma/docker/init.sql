@@ -1,0 +1,18 @@
+DO
+$$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dispatchgrid_app') THEN
+    CREATE ROLE dispatchgrid_app LOGIN PASSWORD 'dispatchgrid_app';
+  END IF;
+END
+$$;
+
+GRANT CONNECT ON DATABASE dispatchgrid TO dispatchgrid_app;
+GRANT USAGE ON SCHEMA public TO dispatchgrid_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO dispatchgrid_app;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO dispatchgrid_app;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO dispatchgrid_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+  GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO dispatchgrid_app;
