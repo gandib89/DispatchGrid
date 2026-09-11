@@ -2,6 +2,7 @@ import { prisma } from '../db/client.js'
 import {
   agentNotEligible,
   alreadyAssigned,
+  forbidden,
   invalidTransition,
   notFound,
   versionConflict,
@@ -147,4 +148,181 @@ async function scopedMembership(actor, agentUserId) {
     })
   }
   return membership
+}
+
+// Rejection-code choice (documented): a missing or non-OFFERED assignment is
+// 422 invalid_transition, never 409. The 409 version_conflict is reserved for
+// a stale expectedVersion on an otherwise valid owned offer, so callers can
+// tell "someone else changed the job, re-read and retry" apart from "there is
+// no offer for you to answer". Ownership violations are 403 forbidden and are
+// checked before the version claim so a cross-agent probe never learns
+// version state.
+export async function acceptJob(actor, jobId, input = {}) {
+  requirePermission(actor, 'job.respond')
+  const expectedVersion = input?.version
+
+  const { data, replay } = await runIdempotent({
+    operation: 'job.accept',
+    organizationId: actor.organizationId,
+    key: input?.key,
+    fingerprintSource: { jobId, version: expectedVersion },
+    responseStatus: 200,
+    execute: async (tx) => {
+      const job = await scopedJob(tx, actor, jobId)
+
+      const offer = await tx.assignment.findFirst({
+        where: {
+          organizationId: actor.organizationId,
+          jobId,
+          state: 'OFFERED',
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      if (!offer) {
+        throw invalidTransition(`Only offered jobs can be accepted, not ${job.status}`)
+      }
+      if (offer.agentId !== actor.userId) {
+        throw forbidden('Only the offered agent can accept this job')
+      }
+      if (job.status !== 'ASSIGNED') {
+        throw invalidTransition(`Only assigned jobs can be accepted, not ${job.status}`)
+      }
+
+      const claimed = await tx.job.updateMany({
+        where: {
+          id: jobId,
+          organizationId: actor.organizationId,
+          version: expectedVersion,
+          status: 'ASSIGNED',
+        },
+        data: { status: 'ACCEPTED', version: job.version + 1 },
+      })
+      if (claimed.count === 0) {
+        const fresh = await tx.job.findFirst({
+          where: { id: jobId, organizationId: actor.organizationId },
+        })
+        if (!fresh) {
+          throw notFound('Job not found')
+        }
+        throw versionConflict('The job changed since it was read', {
+          currentVersion: fresh.version,
+          currentStatus: fresh.status,
+        })
+      }
+
+      const moved = await tx.assignment.updateMany({
+        where: {
+          id: offer.id,
+          organizationId: actor.organizationId,
+          state: 'OFFERED',
+        },
+        data: { state: 'ACCEPTED' },
+      })
+      if (moved.count === 0) {
+        throw invalidTransition('This offer is no longer available')
+      }
+
+      await tx.jobEvent.create({
+        data: {
+          organizationId: actor.organizationId,
+          jobId,
+          actorUserId: actor.userId,
+          fromStatus: 'ASSIGNED',
+          toStatus: 'ACCEPTED',
+          reason: 'Agent accepted',
+        },
+      })
+
+      const updated = await tx.job.findUniqueOrThrow({ where: { id: jobId } })
+      const accepted = await tx.assignment.findUniqueOrThrow({ where: { id: offer.id } })
+      return { job: toPlain(updated), assignment: toPlain(accepted) }
+    },
+  })
+
+  return { ...data, replay }
+}
+
+export async function declineJob(actor, jobId, input = {}) {
+  requirePermission(actor, 'job.respond')
+  const expectedVersion = input?.version
+
+  const { data, replay } = await runIdempotent({
+    operation: 'job.decline',
+    organizationId: actor.organizationId,
+    key: input?.key,
+    fingerprintSource: { jobId, version: expectedVersion },
+    responseStatus: 200,
+    execute: async (tx) => {
+      const job = await scopedJob(tx, actor, jobId)
+
+      const offer = await tx.assignment.findFirst({
+        where: {
+          organizationId: actor.organizationId,
+          jobId,
+          state: 'OFFERED',
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+      if (!offer) {
+        throw invalidTransition(`Only offered jobs can be declined, not ${job.status}`)
+      }
+      if (offer.agentId !== actor.userId) {
+        throw forbidden('Only the offered agent can decline this job')
+      }
+      if (job.status !== 'ASSIGNED') {
+        throw invalidTransition(`Only assigned jobs can be declined, not ${job.status}`)
+      }
+
+      const claimed = await tx.job.updateMany({
+        where: {
+          id: jobId,
+          organizationId: actor.organizationId,
+          version: expectedVersion,
+          status: 'ASSIGNED',
+        },
+        data: { status: 'PENDING', version: job.version + 1, currentAssigneeId: null },
+      })
+      if (claimed.count === 0) {
+        const fresh = await tx.job.findFirst({
+          where: { id: jobId, organizationId: actor.organizationId },
+        })
+        if (!fresh) {
+          throw notFound('Job not found')
+        }
+        throw versionConflict('The job changed since it was read', {
+          currentVersion: fresh.version,
+          currentStatus: fresh.status,
+        })
+      }
+
+      const moved = await tx.assignment.updateMany({
+        where: {
+          id: offer.id,
+          organizationId: actor.organizationId,
+          state: 'OFFERED',
+        },
+        data: { state: 'DECLINED' },
+      })
+      if (moved.count === 0) {
+        throw invalidTransition('This offer is no longer available')
+      }
+
+      await tx.jobEvent.create({
+        data: {
+          organizationId: actor.organizationId,
+          jobId,
+          actorUserId: actor.userId,
+          fromStatus: 'ASSIGNED',
+          toStatus: 'PENDING',
+          reason: 'Agent declined',
+        },
+      })
+
+      const updated = await tx.job.findUniqueOrThrow({ where: { id: jobId } })
+      const declined = await tx.assignment.findUniqueOrThrow({ where: { id: offer.id } })
+      return { job: toPlain(updated), assignment: toPlain(declined) }
+    },
+  })
+
+  return { ...data, replay }
 }
