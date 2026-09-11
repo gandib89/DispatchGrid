@@ -12,9 +12,6 @@ function lookupPosition(positions, userId) {
   if (positions instanceof Map) {
     return positions.get(userId) ?? null
   }
-  if (positions && typeof positions === 'object') {
-    return positions[userId] ?? null
-  }
   return null
 }
 

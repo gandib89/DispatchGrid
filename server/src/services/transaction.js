@@ -1,5 +1,5 @@
 import { prisma } from '../db/client.js'
-import { forbidden, notFound } from '../errors/http-errors.js'
+import { forbidden, notFound, versionConflict } from '../errors/http-errors.js'
 import { completeKey, dropKey, fingerprintRequest, reserveKey } from '../lib/idempotency.js'
 
 // Shared service-layer plumbing. Every service is transaction-aware with the
@@ -36,6 +36,23 @@ export async function scopedJob(tx, actor, jobId) {
     throw notFound('Job not found')
   }
   return job
+}
+
+// Shared zero-row-claim fallback: every version-claim loser re-reads the job
+// inside the same transaction and reports 404 when the row vanished or 409
+// version_conflict with current state when it moved. One helper so the four
+// assignment operations cannot drift apart.
+export async function claimConflict(tx, actor, jobId) {
+  const fresh = await tx.job.findFirst({
+    where: { id: jobId, organizationId: actor.organizationId },
+  })
+  if (!fresh) {
+    throw notFound('Job not found')
+  }
+  throw versionConflict('The job changed since it was read', {
+    currentVersion: fresh.version,
+    currentStatus: fresh.status,
+  })
 }
 
 // Idempotent wrapper shared by every mutating operation. Without a key the

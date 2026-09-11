@@ -3,13 +3,12 @@ import {
   agentNotEligible,
   alreadyAssigned,
   badRequest,
-  forbidden,
   invalidTransition,
-  notFound,
   versionConflict,
 } from '../errors/http-errors.js'
 import { checkAgentEligibility } from '../lib/jobs/eligibility.js'
 import {
+  claimConflict,
   requirePermission,
   runIdempotent,
   scopedJob,
@@ -22,13 +21,31 @@ const ACTIVE_ASSIGNMENT_STATES = ['OFFERED', 'ACCEPTED']
 // membership first, then the job claim. Job-only operations never take the
 // membership lock, so no path locks in the opposite order. Documented here so
 // later assignment operations keep the same discipline at ReadCommitted.
-async function lockMembership(tx, actor, agentUserId) {
+// Returns the freshly locked membership row (with role name) so eligibility
+// is always decided on post-lock state, never on a stale outer read.
+export async function lockMembership(tx, actor, agentUserId) {
   const rows = await tx.$queryRaw`
-    SELECT id FROM "Membership"
-    WHERE "userId" = ${agentUserId}::uuid AND "organizationId" = ${actor.organizationId}::uuid
+    SELECT m.id, m."organizationId", m."userId", m."roleId",
+           m."isAvailable", m."concurrentJobCap", r.name AS "roleName"
+    FROM "Membership" m
+    JOIN "Role" r ON r.id = m."roleId" AND r."organizationId" = m."organizationId"
+    WHERE m."userId" = ${agentUserId}::uuid AND m."organizationId" = ${actor.organizationId}::uuid
     FOR UPDATE
   `
-  return rows.length > 0
+  if (rows.length === 0) {
+    return null
+  }
+  const row = rows[0]
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    userId: row.userId,
+    roleId: row.roleId,
+    isAvailable: row.isAvailable,
+    concurrentJobCap: row.concurrentJobCap,
+    roleName: row.roleName,
+    role: { name: row.roleName },
+  }
 }
 
 async function activeAssignmentCount(tx, actor, agentUserId) {
@@ -48,7 +65,9 @@ function isUniqueViolation(error) {
 export async function assignJob(actor, jobId, agentUserId, expectedVersion, options = {}) {
   requirePermission(actor, 'job.assign')
 
-  const membership = await scopedMembership(actor, agentUserId)
+  // Outer read keeps the scope check (wrong_organization) before the tx;
+  // eligibility itself is decided on the post-lock row inside the tx below.
+  await scopedMembership(actor, agentUserId)
 
   const { data, replay } = await runIdempotent({
     operation: 'job.assign',
@@ -57,8 +76,8 @@ export async function assignJob(actor, jobId, agentUserId, expectedVersion, opti
     fingerprintSource: { jobId, agentUserId, expectedVersion },
     responseStatus: 200,
     execute: async (tx) => {
-      const locked = await lockMembership(tx, actor, agentUserId)
-      if (!locked) {
+      const lockedMembership = await lockMembership(tx, actor, agentUserId)
+      if (!lockedMembership) {
         throw agentNotEligible('This agent cannot take this job', {
           reasons: ['unknown_membership'],
         })
@@ -69,7 +88,7 @@ export async function assignJob(actor, jobId, agentUserId, expectedVersion, opti
       })
       const activeJobCount = await activeAssignmentCount(tx, actor, agentUserId)
       const eligibility = checkAgentEligibility({
-        membership,
+        membership: lockedMembership,
         organizationId: actor.organizationId,
         activeJobCount,
         defaultCap: organization.defaultConcurrentJobCap,
@@ -98,16 +117,7 @@ export async function assignJob(actor, jobId, agentUserId, expectedVersion, opti
         data: { status: 'ASSIGNED', version: job.version + 1, currentAssigneeId: agentUserId },
       })
       if (claimed.count === 0) {
-        const fresh = await tx.job.findFirst({
-          where: { id: jobId, organizationId: actor.organizationId },
-        })
-        if (!fresh) {
-          throw notFound('Job not found')
-        }
-        throw versionConflict('The job changed since it was read', {
-          currentVersion: fresh.version,
-          currentStatus: fresh.status,
-        })
+        await claimConflict(tx, actor, jobId)
       }
 
       let assignment
@@ -159,13 +169,13 @@ async function scopedMembership(actor, agentUserId) {
   return membership
 }
 
-// Rejection-code choice (documented): a missing or non-OFFERED assignment is
-// 422 invalid_transition, never 409. The 409 version_conflict is reserved for
-// a stale expectedVersion on an otherwise valid owned offer, so callers can
-// tell "someone else changed the job, re-read and retry" apart from "there is
-// no offer for you to answer". Ownership violations are 403 forbidden and are
-// checked before the version claim so a cross-agent probe never learns
-// version state.
+// Rejection-code choice (documented): the actor's OWN OFFERED assignment is
+// the only answerable offer. No own offer plus another live OFFERED row is a
+// lost race -> 409 version_conflict with current state; no OFFERED row at all
+// is 422 invalid_transition. The 409 version_conflict is also used for a stale
+// expectedVersion on an otherwise valid owned offer, so callers can tell
+// "someone else changed the job, re-read and retry" apart from "there is no
+// offer for you to answer".
 export async function acceptJob(actor, jobId, input = {}) {
   requirePermission(actor, 'job.respond')
   const expectedVersion = input?.version
@@ -183,15 +193,27 @@ export async function acceptJob(actor, jobId, input = {}) {
         where: {
           organizationId: actor.organizationId,
           jobId,
+          agentId: actor.userId,
           state: 'OFFERED',
         },
         orderBy: { createdAt: 'desc' },
       })
       if (!offer) {
+        const rivalOffer = await tx.assignment.findFirst({
+          where: {
+            organizationId: actor.organizationId,
+            jobId,
+            state: 'OFFERED',
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+        if (rivalOffer) {
+          throw versionConflict('The job changed since it was read', {
+            currentVersion: job.version,
+            currentStatus: job.status,
+          })
+        }
         throw invalidTransition(`Only offered jobs can be accepted, not ${job.status}`)
-      }
-      if (offer.agentId !== actor.userId) {
-        throw forbidden('Only the offered agent can accept this job')
       }
       if (job.status !== 'ASSIGNED') {
         throw invalidTransition(`Only assigned jobs can be accepted, not ${job.status}`)
@@ -207,19 +229,10 @@ export async function acceptJob(actor, jobId, input = {}) {
         data: { status: 'ACCEPTED', version: job.version + 1 },
       })
       if (claimed.count === 0) {
-        const fresh = await tx.job.findFirst({
-          where: { id: jobId, organizationId: actor.organizationId },
-        })
-        if (!fresh) {
-          throw notFound('Job not found')
-        }
-        throw versionConflict('The job changed since it was read', {
-          currentVersion: fresh.version,
-          currentStatus: fresh.status,
-        })
+        await claimConflict(tx, actor, jobId)
       }
 
-      const moved = await tx.assignment.updateMany({
+      const offerMove = await tx.assignment.updateMany({
         where: {
           id: offer.id,
           organizationId: actor.organizationId,
@@ -227,7 +240,7 @@ export async function acceptJob(actor, jobId, input = {}) {
         },
         data: { state: 'ACCEPTED' },
       })
-      if (moved.count === 0) {
+      if (offerMove.count === 0) {
         throw invalidTransition('This offer is no longer available')
       }
 
@@ -268,15 +281,27 @@ export async function declineJob(actor, jobId, input = {}) {
         where: {
           organizationId: actor.organizationId,
           jobId,
+          agentId: actor.userId,
           state: 'OFFERED',
         },
         orderBy: { createdAt: 'desc' },
       })
       if (!offer) {
+        const rivalOffer = await tx.assignment.findFirst({
+          where: {
+            organizationId: actor.organizationId,
+            jobId,
+            state: 'OFFERED',
+          },
+          orderBy: { createdAt: 'desc' },
+        })
+        if (rivalOffer) {
+          throw versionConflict('The job changed since it was read', {
+            currentVersion: job.version,
+            currentStatus: job.status,
+          })
+        }
         throw invalidTransition(`Only offered jobs can be declined, not ${job.status}`)
-      }
-      if (offer.agentId !== actor.userId) {
-        throw forbidden('Only the offered agent can decline this job')
       }
       if (job.status !== 'ASSIGNED') {
         throw invalidTransition(`Only assigned jobs can be declined, not ${job.status}`)
@@ -292,19 +317,10 @@ export async function declineJob(actor, jobId, input = {}) {
         data: { status: 'PENDING', version: job.version + 1, currentAssigneeId: null },
       })
       if (claimed.count === 0) {
-        const fresh = await tx.job.findFirst({
-          where: { id: jobId, organizationId: actor.organizationId },
-        })
-        if (!fresh) {
-          throw notFound('Job not found')
-        }
-        throw versionConflict('The job changed since it was read', {
-          currentVersion: fresh.version,
-          currentStatus: fresh.status,
-        })
+        await claimConflict(tx, actor, jobId)
       }
 
-      const moved = await tx.assignment.updateMany({
+      const offerMove = await tx.assignment.updateMany({
         where: {
           id: offer.id,
           organizationId: actor.organizationId,
@@ -312,7 +328,7 @@ export async function declineJob(actor, jobId, input = {}) {
         },
         data: { state: 'DECLINED' },
       })
-      if (moved.count === 0) {
+      if (offerMove.count === 0) {
         throw invalidTransition('This offer is no longer available')
       }
 
@@ -344,7 +360,9 @@ export async function reassignJob(actor, jobId, newAgentUserId, expectedVersion,
     throw badRequest('A reason is required to reassign a job')
   }
 
-  const membership = await scopedMembership(actor, newAgentUserId)
+  // Outer read keeps the scope check (wrong_organization) before the tx;
+  // eligibility itself is decided on the post-lock row inside the tx below.
+  await scopedMembership(actor, newAgentUserId)
 
   const { data, replay } = await runIdempotent({
     operation: 'job.reassign',
@@ -353,8 +371,8 @@ export async function reassignJob(actor, jobId, newAgentUserId, expectedVersion,
     fingerprintSource: { jobId, newAgentUserId, expectedVersion, reason },
     responseStatus: 200,
     execute: async (tx) => {
-      const locked = await lockMembership(tx, actor, newAgentUserId)
-      if (!locked) {
+      const lockedMembership = await lockMembership(tx, actor, newAgentUserId)
+      if (!lockedMembership) {
         throw agentNotEligible('This agent cannot take this job', {
           reasons: ['unknown_membership'],
         })
@@ -365,7 +383,7 @@ export async function reassignJob(actor, jobId, newAgentUserId, expectedVersion,
       })
       const activeJobCount = await activeAssignmentCount(tx, actor, newAgentUserId)
       const eligibility = checkAgentEligibility({
-        membership,
+        membership: lockedMembership,
         organizationId: actor.organizationId,
         activeJobCount,
         defaultCap: organization.defaultConcurrentJobCap,
@@ -377,7 +395,11 @@ export async function reassignJob(actor, jobId, newAgentUserId, expectedVersion,
       }
 
       const job = await scopedJob(tx, actor, jobId)
-      if (job.status !== 'ASSIGNED') {
+      if (job.status === 'PENDING') {
+        // PENDING was never assigned: wrong operation, the caller should use
+        // the offer path. Every other non-ASSIGNED status falls through to
+        // the conditional version claim below so a sequential loser learns
+        // the current version and status via 409, never a bare 422.
         throw invalidTransition(`Only assigned jobs can be reassigned, not ${job.status}`)
       }
 
@@ -386,16 +408,7 @@ export async function reassignJob(actor, jobId, newAgentUserId, expectedVersion,
         data: { status: 'ASSIGNED', version: job.version + 1, currentAssigneeId: newAgentUserId },
       })
       if (claimed.count === 0) {
-        const fresh = await tx.job.findFirst({
-          where: { id: jobId, organizationId: actor.organizationId },
-        })
-        if (!fresh) {
-          throw notFound('Job not found')
-        }
-        throw versionConflict('The job changed since it was read', {
-          currentVersion: fresh.version,
-          currentStatus: fresh.status,
-        })
+        await claimConflict(tx, actor, jobId)
       }
 
       await tx.assignment.updateMany({

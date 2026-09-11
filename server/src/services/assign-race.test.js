@@ -3,7 +3,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { seedDatabase } from '../../prisma/seed.js'
 import { prisma } from '../db/client.js'
 import { createJob } from './job-service.js'
-import { assignJob } from './assignment-service.js'
+import { assignJob, acceptJob, declineJob } from './assignment-service.js'
 import { createOwnerTestClient, resetDatabase } from '../test/helpers.js'
 
 // [B09-T2] Two-dispatcher race proof. Service seam against real PostgreSQL.
@@ -251,7 +251,9 @@ describe('assign race proof (B09-T2)', () => {
         isAvailable: true,
       },
     })
+    const extraAgent = await buildActor(extraUser.email)
     const agentIds = [agent.userId, extraUser.id]
+    const agentActors = [agent, extraAgent]
 
     const jobCount = 6
     const jobs = []
@@ -267,23 +269,69 @@ describe('assign race proof (B09-T2)', () => {
     for (let i = 0; i < attempts; i += 1) {
       const job = jobs[Math.floor(random() * jobs.length)]
       const agentId = agentIds[Math.floor(random() * agentIds.length)]
-      // Mix: usually the plausible version 1, sometimes a clearly stale one.
-      const expectedVersion = random() < 0.7 ? 1 : 999
+      const responder = agentActors[Math.floor(random() * agentActors.length)]
+      const op = random()
 
-      const outcome = await assignJob(dispatcher, job.id, agentId, expectedVersion, {
-        key: uniqueKey(`prop-${i}`),
-      }).then(
-        (value) => ({ ok: true, value }),
-        (error) => ({ ok: false, error }),
-      )
-      if (outcome.ok) {
-        successes += 1
-        expect(outcome.value.job.status).toBe('ASSIGNED')
-      } else {
-        conflicts += 1
-        expect(['version_conflict', 'already_assigned', 'agent_not_eligible']).toContain(
-          outcome.error.code,
+      let outcome
+      if (op < 0.6) {
+        // Offer attempt: usually the plausible version 1, sometimes stale.
+        const expectedVersion = random() < 0.7 ? 1 : 999
+        outcome = await assignJob(dispatcher, job.id, agentId, expectedVersion, {
+          key: uniqueKey(`prop-${i}`),
+        }).then(
+          (value) => ({ ok: true, value }),
+          (error) => ({ ok: false, error }),
         )
+        if (outcome.ok) {
+          successes += 1
+          expect(outcome.value.job.status).toBe('ASSIGNED')
+        } else {
+          conflicts += 1
+          expect(['version_conflict', 'already_assigned', 'agent_not_eligible']).toContain(
+            outcome.error.code,
+          )
+        }
+      } else if (op < 0.8) {
+        // Accept attempt on the fresh version (or a stale one): exercises the
+        // own-offer-first path and the lost-race 409.
+        const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+        const expectedVersion = random() < 0.7 ? fresh.version : 999
+        outcome = await acceptJob(responder, job.id, {
+          version: expectedVersion,
+          key: uniqueKey(`prop-accept-${i}`),
+        }).then(
+          (value) => ({ ok: true, value }),
+          (error) => ({ ok: false, error }),
+        )
+        if (outcome.ok) {
+          successes += 1
+          expect(outcome.value.job.status).toBe('ACCEPTED')
+        } else {
+          conflicts += 1
+          expect(
+            ['version_conflict', 'invalid_transition', 'already_assigned', 'forbidden'],
+          ).toContain(outcome.error.code)
+        }
+      } else {
+        // Decline attempt on the fresh version (or a stale one).
+        const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+        const expectedVersion = random() < 0.7 ? fresh.version : 999
+        outcome = await declineJob(responder, job.id, {
+          version: expectedVersion,
+          key: uniqueKey(`prop-decline-${i}`),
+        }).then(
+          (value) => ({ ok: true, value }),
+          (error) => ({ ok: false, error }),
+        )
+        if (outcome.ok) {
+          successes += 1
+          expect(outcome.value.job.status).toBe('PENDING')
+        } else {
+          conflicts += 1
+          expect(
+            ['version_conflict', 'invalid_transition', 'already_assigned', 'forbidden'],
+          ).toContain(outcome.error.code)
+        }
       }
 
       // Invariant sweep after every attempt: no impossible pair anywhere.
@@ -299,7 +347,7 @@ describe('assign race proof (B09-T2)', () => {
           where: { jobId: row.id, state: { in: ['OFFERED', 'ACCEPTED'] } },
         })
         expect(actives.length).toBeLessThanOrEqual(1)
-        if (row.status === 'ASSIGNED') {
+        if (row.status === 'ASSIGNED' || row.status === 'ACCEPTED') {
           expect(actives).toHaveLength(1)
           expect(row.currentAssigneeId).toBe(actives[0].agentId)
         }
