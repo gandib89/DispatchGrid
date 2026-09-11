@@ -380,17 +380,21 @@ describe('post-commit adapter seam (T4)', () => {
       }
     }
 
-    // The route wires the seam only after the committed service promise.
+    // The route wires the seam only after the committed service promise:
+    // every write funnels through the afterJobCommit helper (invalidate +
+    // hooks), which itself is defined once near the top of the file.
     const routes = src('routes/jobs.js')
     const commitIndex = routes.indexOf('await createJob')
     expect(commitIndex).toBeGreaterThan(-1)
-    for (const token of [
-      'invalidateBoardCache',
-      'publishJobEvent',
-      'enqueueJobWork',
-    ]) {
-      // Imports live at the top of the file, so search from the commit point.
-      expect(routes.indexOf(token, commitIndex)).toBeGreaterThan(commitIndex)
+    expect(routes.indexOf('async function afterJobCommit')).toBeGreaterThan(-1)
+    expect(routes.indexOf('invalidateBoardCache')).toBeGreaterThan(-1)
+    expect(routes.indexOf('await afterJobCommit', commitIndex)).toBeGreaterThan(
+      commitIndex,
+    )
+    // The adapter entry fans out to both hooks via the mutable hook object.
+    const adapters = src('lib/integration-adapters.js')
+    for (const token of ['publishJobEvent', 'enqueueJobWork', 'afterJobCommit']) {
+      expect(adapters.indexOf(token)).toBeGreaterThan(-1)
     }
   })
 })
