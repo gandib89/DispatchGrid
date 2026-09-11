@@ -595,6 +595,59 @@ describe('POST /api/v1/jobs/:id/accept and /decline', () => {
       }),
     ).toBe(1)
   })
+
+  it('replays the identical decline for the same key without duplicating', async () => {
+    const org = await setupAssignmentOrg()
+    const job = await createJobViaHttp(org.dispatcherToken)
+
+    await request(app)
+      .post(`/api/v1/jobs/${job.id}/assign`)
+      .set('Authorization', `Bearer ${org.dispatcherToken}`)
+      .set('Idempotency-Key', crypto.randomUUID())
+      .send({ agentId: org.agent.id, version: 1 })
+
+    const key = crypto.randomUUID()
+    const send = () =>
+      request(app)
+        .post(`/api/v1/jobs/${job.id}/decline`)
+        .set('Authorization', `Bearer ${org.agentToken}`)
+        .set('Idempotency-Key', key)
+        .send({ version: 2 })
+
+    const first = await send()
+    const second = await send()
+
+    expect(first.status).toBe(200)
+    expect(second.status).toBe(200)
+    expect(second.headers['idempotent-replay']).toBe('true')
+    expect(second.body).toEqual(first.body)
+    expect(
+      await ownerDatabase.jobEvent.count({
+        where: { jobId: job.id, fromStatus: 'ASSIGNED', toStatus: 'PENDING' },
+      }),
+    ).toBe(1)
+  })
+
+  it('returns 404 for cross-organization decline writes', async () => {
+    const orgA = await setupAssignmentOrg()
+    const orgB = await setupAssignmentOrg()
+    const job = await createJobViaHttp(orgA.dispatcherToken)
+
+    await request(app)
+      .post(`/api/v1/jobs/${job.id}/assign`)
+      .set('Authorization', `Bearer ${orgA.dispatcherToken}`)
+      .set('Idempotency-Key', crypto.randomUUID())
+      .send({ agentId: orgA.agent.id, version: 1 })
+
+    const response = await request(app)
+      .post(`/api/v1/jobs/${job.id}/decline`)
+      .set('Authorization', `Bearer ${orgB.agentToken}`)
+      .set('Idempotency-Key', crypto.randomUUID())
+      .send({ version: 2 })
+
+    expect(response.status).toBe(404)
+    expect(response.body.error.code).toBe('not_found')
+  })
 })
 
 describe('GET /api/v1/jobs/:id/suggestions', () => {
