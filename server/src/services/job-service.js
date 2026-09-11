@@ -317,6 +317,7 @@ export async function cancelJob(actor, jobId, input = {}, options = {}) {
     responseStatus: 200,
     toStatus: 'CANCELLED',
     version: input.version,
+    extraUpdate: { currentAssigneeId: null },
     eventReason: reason,
     closeAssignmentsTo: 'REVOKED',
   })

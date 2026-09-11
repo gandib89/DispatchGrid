@@ -377,3 +377,155 @@ describe('cancelJob and failJob', () => {
     expect(wrongState.code).toBe('invalid_transition')
   })
 })
+
+describe('transition ownership hardening (B09-T5)', () => {
+  it('denies start to a non-assigned agent without touching job, assignment, or timeline', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    const shadow = await buildActor(shadowEmail)
+    const job = await acceptedFixture(dispatcher, agent.userId)
+    const outsider = { ...shadow, organizationId: dispatcher.organizationId }
+
+    const error = await startJob(outsider, job.id, { version: 1 }).catch((e) => e)
+    expect(error.code).toBe('forbidden')
+    expect(error.status).toBe(403)
+
+    const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(fresh.status).toBe('ACCEPTED')
+    expect(fresh.version).toBe(1)
+    expect(fresh.currentAssigneeId).toBe(agent.userId)
+    expect(await ownerDatabase.assignment.count({ where: { jobId: job.id } })).toBe(1)
+    expect(await ownerDatabase.jobEvent.count({ where: { jobId: job.id } })).toBe(0)
+  })
+
+  it('denies complete to a non-assigned agent with respond permission, leaving rows untouched', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    const shadow = await buildActor(shadowEmail)
+    expect(shadow.permissions).toContain('job.respond')
+    const job = await inProgressFixture(dispatcher, agent.userId)
+    const outsider = { ...shadow, organizationId: dispatcher.organizationId }
+
+    const error = await completeJob(outsider, job.id, { version: 2 }).catch((e) => e)
+    expect(error.code).toBe('forbidden')
+    expect(error.status).toBe(403)
+
+    const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(fresh.status).toBe('IN_PROGRESS')
+    expect(fresh.version).toBe(2)
+    expect(fresh.currentAssigneeId).toBe(agent.userId)
+    expect(fresh.completedAt).toBeNull()
+    const assignments = await ownerDatabase.assignment.findMany({ where: { jobId: job.id } })
+    expect(assignments).toHaveLength(1)
+    expect(assignments[0].state).toBe('ACCEPTED')
+    expect(await ownerDatabase.jobEvent.count({ where: { jobId: job.id } })).toBe(0)
+  })
+
+  it('denies fail to a non-assigned agent with respond permission, leaving rows untouched', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    const shadow = await buildActor(shadowEmail)
+    expect(shadow.permissions).toContain('job.respond')
+    const job = await inProgressFixture(dispatcher, agent.userId)
+    const outsider = { ...shadow, organizationId: dispatcher.organizationId }
+
+    const error = await failJob(outsider, job.id, {
+      version: 2,
+      reason: 'Not my job but trying anyway',
+    }).catch((e) => e)
+    expect(error.code).toBe('forbidden')
+    expect(error.status).toBe(403)
+
+    const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(fresh.status).toBe('IN_PROGRESS')
+    expect(fresh.version).toBe(2)
+    expect(fresh.currentAssigneeId).toBe(agent.userId)
+    const assignments = await ownerDatabase.assignment.findMany({ where: { jobId: job.id } })
+    expect(assignments).toHaveLength(1)
+    expect(assignments[0].state).toBe('ACCEPTED')
+    expect(await ownerDatabase.jobEvent.count({ where: { jobId: job.id } })).toBe(0)
+  })
+
+  it("lets a dispatcher with cancel permission cancel someone else's job", async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    expect(dispatcher.permissions).toContain('job.cancel')
+    const job = await inProgressFixture(dispatcher, agent.userId)
+
+    const { job: cancelled } = await cancelJob(dispatcher, job.id, {
+      version: 2,
+      reason: 'Customer withdrew the request',
+    })
+    expect(cancelled.status).toBe('CANCELLED')
+    expect(cancelled.version).toBe(3)
+    expect(cancelled.currentAssigneeId).toBeNull()
+
+    const assignments = await ownerDatabase.assignment.findMany({ where: { jobId: job.id } })
+    expect(assignments).toHaveLength(1)
+    expect(assignments[0].state).toBe('REVOKED')
+    const events = await ownerDatabase.jobEvent.findMany({ where: { jobId: job.id } })
+    expect(events).toHaveLength(1)
+    expect(events[0].toStatus).toBe('CANCELLED')
+  })
+
+  it('denies start to the assignee without the respond permission', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    const job = await acceptedFixture(dispatcher, agent.userId)
+    const withoutRespond = {
+      ...agent,
+      permissions: agent.permissions.filter((code) => code !== 'job.respond'),
+    }
+
+    const error = await startJob(withoutRespond, job.id, { version: 1 }).catch((e) => e)
+    expect(error.code).toBe('forbidden')
+    expect(error.status).toBe(403)
+
+    const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(fresh.status).toBe('ACCEPTED')
+    expect(fresh.version).toBe(1)
+    expect(await ownerDatabase.jobEvent.count({ where: { jobId: job.id } })).toBe(0)
+  })
+
+  it('denies complete to the assignee without the respond permission', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    const job = await inProgressFixture(dispatcher, agent.userId)
+    const withoutRespond = {
+      ...agent,
+      permissions: agent.permissions.filter((code) => code !== 'job.respond'),
+    }
+
+    const error = await completeJob(withoutRespond, job.id, { version: 2 }).catch((e) => e)
+    expect(error.code).toBe('forbidden')
+    expect(error.status).toBe(403)
+
+    const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(fresh.status).toBe('IN_PROGRESS')
+    expect(fresh.version).toBe(2)
+    expect(fresh.completedAt).toBeNull()
+    expect(await ownerDatabase.jobEvent.count({ where: { jobId: job.id } })).toBe(0)
+  })
+
+  it('denies fail to the assignee without the respond permission', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    const job = await inProgressFixture(dispatcher, agent.userId)
+    const withoutRespond = {
+      ...agent,
+      permissions: agent.permissions.filter((code) => code !== 'job.respond'),
+    }
+
+    const error = await failJob(withoutRespond, job.id, {
+      version: 2,
+      reason: 'Pump seized beyond repair',
+    }).catch((e) => e)
+    expect(error.code).toBe('forbidden')
+    expect(error.status).toBe(403)
+
+    const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(fresh.status).toBe('IN_PROGRESS')
+    expect(fresh.version).toBe(2)
+    expect(await ownerDatabase.jobEvent.count({ where: { jobId: job.id } })).toBe(0)
+  })
+})
