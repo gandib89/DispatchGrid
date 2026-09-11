@@ -7,8 +7,10 @@ import { resolveTenant } from '../middleware/resolve-tenant.js'
 import { auditLog } from '../middleware/audit-log.js'
 import { jobSchemas } from '../../../shared/job-schema.js'
 import { cancelJob, completeJob, createJob, failJob, patchJob, startJob } from '../services/job-service.js'
+import { acceptJob, assignJob, declineJob } from '../services/assignment-service.js'
+import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
-import { serializeJob } from '../serializers/job-serializer.js'
+import { serializeAssignment, serializeJob } from '../serializers/job-serializer.js'
 
 // Seams for T3-T4 (not built here): assignment (assign/accept/decline),
 // suggestions, timeline/events. They reuse this pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
@@ -337,6 +339,136 @@ router.post(
         resourceId: job.id,
       }
       res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// ---- B10-T3 (#22): assignment + suggestions routes (additive) ----
+// Human-assignment endpoints over HTTP. Same pipeline as above
+// (authenticate -> resolveTenant -> authorize -> strict parse -> actorFrom ->
+// service -> serialize -> respond); every committed write invalidates the
+// tenant board cache. Status contract follows the services' idempotency
+// responseStatus: 200 with { job, assignment } for offer/response moves
+// (POST / stays the only 201). Version is mandatory on all three writes;
+// stale versions surface as 409 version_conflict carrying fresh
+// { currentVersion, currentStatus }. T2 (PATCH/transitions) and T4
+// (timeline/audit/adapters) seams above are untouched.
+
+// Offer a PENDING job to an eligible agent. Idempotent via Idempotency-Key.
+router.post(
+  '/:id/assign',
+  authenticate,
+  resolveTenant(),
+  authorize('job.assign'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const body = schemas.assignJobSchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, assignment, replay } = await assignJob(actor, params.id, body.agentId, body.version, {
+        key: idempotencyKeyFrom(req),
+      })
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/assign',
+        resourceType: 'assignment',
+        resourceId: assignment.id,
+      }
+      res.status(200).json({ job: serializeJob(job), assignment: serializeAssignment(assignment) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Accept the caller's own OFFERED assignment. Ownership + version enforced
+// in the service: another agent's offer is 409 version_conflict, no offer
+// at all is 422 invalid_transition.
+router.post(
+  '/:id/accept',
+  authenticate,
+  resolveTenant(),
+  authorize('job.respond'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const body = schemas.versionOnlySchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, assignment, replay } = await acceptJob(actor, params.id, {
+        version: body.version,
+        key: idempotencyKeyFrom(req),
+      })
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/accept',
+        resourceType: 'assignment',
+        resourceId: assignment.id,
+      }
+      res.status(200).json({ job: serializeJob(job), assignment: serializeAssignment(assignment) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Decline the caller's own OFFERED assignment; the job returns to PENDING.
+router.post(
+  '/:id/decline',
+  authenticate,
+  resolveTenant(),
+  authorize('job.respond'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const body = schemas.versionOnlySchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, assignment, replay } = await declineJob(actor, params.id, {
+        version: body.version,
+        key: idempotencyKeyFrom(req),
+      })
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/decline',
+        resourceType: 'assignment',
+        resourceId: assignment.id,
+      }
+      res.status(200).json({ job: serializeJob(job), assignment: serializeAssignment(assignment) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Ranked eligible agents with component scores. Pure deterministic read:
+// no writes, succeeds with zero candidates, never cached. Positions default
+// to unknown (B14 tracking plugs live coordinates into this seam later).
+router.get(
+  '/:id/suggestions',
+  authenticate,
+  resolveTenant(),
+  authorize('job.assign'),
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const suggestions = await suggestAgents(actorFrom(req), params.id)
+      res.json({ suggestions })
     } catch (error) {
       next(error)
     }
