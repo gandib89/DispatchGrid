@@ -8,9 +8,13 @@ import { auditLog } from '../middleware/audit-log.js'
 import { jobSchemas } from '../../../shared/job-schema.js'
 import { createJob } from '../services/job-service.js'
 import { scopedJob } from '../services/transaction.js'
-import { serializeJob } from '../serializers/job-serializer.js'
+import { serializeEvent, serializeJob } from '../serializers/job-serializer.js'
+import {
+  enqueueJobWork,
+  publishJobEvent,
+} from '../lib/integration-adapters.js'
 
-// Seams for T2-T4 (not built here): transitions (PATCH, assign/accept/decline/
+// Seams for T2-T3 (not built here): transitions (PATCH, assign/accept/decline/
 // start/complete/cancel/fail), suggestions, timeline/events. They reuse this
 // pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
 // actorFrom -> service -> serialize -> respond), call invalidateBoardCache
@@ -145,6 +149,21 @@ router.post(
         key: idempotencyKeyFrom(req),
       })
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -172,6 +191,29 @@ router.get(
       const params = schemas.jobIdParamsSchema.parse(req.params)
       const job = await scopedJob(prisma, actorFrom(req), params.id)
       res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Durable per-job timeline: ordered JobEvent history (actor, transition,
+// reason, time). Scoped read — cross-org returns 404, never 403. Uncached.
+router.get(
+  '/:id/events',
+  authenticate,
+  resolveTenant(),
+  authorize('job.view'),
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const actor = actorFrom(req)
+      await scopedJob(prisma, actor, params.id)
+      const events = await prisma.jobEvent.findMany({
+        where: { jobId: params.id, organizationId: actor.organizationId },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      })
+      res.json({ events: events.map(serializeEvent) })
     } catch (error) {
       next(error)
     }
