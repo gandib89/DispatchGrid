@@ -10,9 +10,13 @@ import { cancelJob, completeJob, createJob, failJob, patchJob, startJob } from '
 import { acceptJob, assignJob, declineJob } from '../services/assignment-service.js'
 import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
-import { serializeAssignment, serializeJob } from '../serializers/job-serializer.js'
+import { serializeAssignment, serializeEvent, serializeJob } from '../serializers/job-serializer.js'
+import {
+  enqueueJobWork,
+  publishJobEvent,
+} from '../lib/integration-adapters.js'
 
-// Seams for T3-T4 (not built here): assignment (assign/accept/decline),
+// B10-T2/T3/T4 (built): transitions (PATCH, start/complete/cancel/fail),
 // suggestions, timeline/events. They reuse this pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
 // actorFrom -> service -> serialize -> respond), call invalidateBoardCache
 // after every committed write, and attach post-commit queue/socket hooks after
@@ -146,6 +150,21 @@ router.post(
         key: idempotencyKeyFrom(req),
       })
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -197,6 +216,21 @@ router.patch(
         key: idempotencyKeyFrom(req),
       })
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -230,6 +264,21 @@ router.post(
         { version: input.version, key: idempotencyKeyFrom(req) },
       )
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -263,6 +312,21 @@ router.post(
         { version: input.version, key: idempotencyKeyFrom(req) },
       )
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -296,6 +360,21 @@ router.post(
         { version: input.version, reason: input.reason, key: idempotencyKeyFrom(req) },
       )
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -329,6 +408,21 @@ router.post(
         { version: input.version, reason: input.reason, key: idempotencyKeyFrom(req) },
       )
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -372,6 +466,21 @@ router.post(
         key: idempotencyKeyFrom(req),
       })
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -407,6 +516,21 @@ router.post(
         key: idempotencyKeyFrom(req),
       })
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -440,6 +564,21 @@ router.post(
         key: idempotencyKeyFrom(req),
       })
       invalidateBoardCache(actor.organizationId)
+      // Post-commit seam (T4 no-ops): commit already happened inside the
+      // service; a throwing hook must never fail the request or the board.
+      try {
+        await publishJobEvent({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+          status: job.status,
+        })
+        await enqueueJobWork({
+          jobId: job.id,
+          organizationId: actor.organizationId,
+        })
+      } catch (error) {
+        req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+      }
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')
@@ -469,6 +608,29 @@ router.get(
       const params = schemas.jobIdParamsSchema.parse(req.params)
       const suggestions = await suggestAgents(actorFrom(req), params.id)
       res.json({ suggestions })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Durable per-job timeline: ordered JobEvent history (actor, transition,
+// reason, time). Scoped read — cross-org returns 404, never 403. Uncached.
+router.get(
+  '/:id/events',
+  authenticate,
+  resolveTenant(),
+  authorize('job.view'),
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const actor = actorFrom(req)
+      await scopedJob(prisma, actor, params.id)
+      const events = await prisma.jobEvent.findMany({
+        where: { jobId: params.id, organizationId: actor.organizationId },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      })
+      res.json({ events: events.map(serializeEvent) })
     } catch (error) {
       next(error)
     }
