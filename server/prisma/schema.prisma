@@ -1,0 +1,257 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum JobPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum JobStatus {
+  PENDING
+  ASSIGNED
+  ACCEPTED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum SlaState {
+  OK
+  WARNING
+  BREACHED
+}
+
+enum AssignmentState {
+  OFFERED
+  ACCEPTED
+  DECLINED
+  REVOKED
+  COMPLETED
+}
+
+model Organization {
+  id                      String           @id @default(uuid()) @db.Uuid
+  name                    String           @db.VarChar(160)
+  slug                    String           @unique @db.VarChar(80)
+  defaultConcurrentJobCap Int              @default(3)
+  createdAt               DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt               DateTime         @updatedAt @db.Timestamptz(6)
+  memberships             Membership[]
+  roles                   Role[]
+  rolePermissions         RolePermission[]
+  auditLogs               AuditLog[]
+  idempotencyKeys         IdempotencyKey[]
+  counters                Counter[]
+  jobs                    Job[]
+  assignments             Assignment[]
+  jobEvents               JobEvent[]
+
+  @@index([createdAt])
+}
+
+model User {
+  id            String         @id @default(uuid()) @db.Uuid
+  email         String         @unique @db.Citext
+  passwordHash  String         @db.VarChar(255)
+  displayName   String         @db.VarChar(120)
+  createdAt     DateTime       @default(now()) @db.Timestamptz(6)
+  updatedAt     DateTime       @updatedAt @db.Timestamptz(6)
+  memberships   Membership[]
+  refreshTokens RefreshToken[]
+  auditLogs     AuditLog[]
+}
+
+model Membership {
+  id               String       @id @default(uuid()) @db.Uuid
+  organizationId   String       @db.Uuid
+  userId           String       @db.Uuid
+  roleId           String       @db.Uuid
+  isAvailable      Boolean      @default(false)
+  concurrentJobCap Int?
+  createdAt        DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt        DateTime     @updatedAt @db.Timestamptz(6)
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user             User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  role             Role         @relation(fields: [organizationId, roleId], references: [organizationId, id], onDelete: Restrict)
+
+  @@unique([organizationId, userId])
+  @@unique([organizationId, id])
+  @@index([organizationId, roleId])
+  @@index([organizationId, isAvailable])
+  @@index([userId])
+}
+
+model Role {
+  id              String           @id @default(uuid()) @db.Uuid
+  organizationId  String           @db.Uuid
+  name            String           @db.VarChar(80)
+  description     String?          @db.VarChar(255)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime         @updatedAt @db.Timestamptz(6)
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  memberships     Membership[]
+  rolePermissions RolePermission[]
+
+  @@unique([organizationId, name])
+  @@unique([organizationId, id])
+  @@index([organizationId, createdAt])
+}
+
+model Permission {
+  id              String           @id @default(uuid()) @db.Uuid
+  code            String           @unique @db.VarChar(80)
+  description     String           @db.VarChar(255)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(6)
+  rolePermissions RolePermission[]
+}
+
+model RolePermission {
+  organizationId String       @db.Uuid
+  roleId         String       @db.Uuid
+  permissionId   String       @db.Uuid
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role           Role         @relation(fields: [organizationId, roleId], references: [organizationId, id], onDelete: Restrict)
+  permission     Permission   @relation(fields: [permissionId], references: [id], onDelete: Restrict)
+
+  @@id([roleId, permissionId])
+  @@index([organizationId, permissionId])
+}
+
+model RefreshToken {
+  id                String        @id @default(uuid()) @db.Uuid
+  userId            String        @db.Uuid
+  tokenHash         String        @unique @db.VarChar(255)
+  familyId          String        @db.Uuid
+  expiresAt         DateTime      @db.Timestamptz(6)
+  revokedAt         DateTime?     @db.Timestamptz(6)
+  replacedByTokenId String?       @unique @db.Uuid
+  createdAt         DateTime      @default(now()) @db.Timestamptz(6)
+  user              User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  replacedBy        RefreshToken? @relation("RefreshTokenRotation", fields: [replacedByTokenId], references: [id], onDelete: Restrict)
+  replaces          RefreshToken? @relation("RefreshTokenRotation")
+
+  @@index([userId, createdAt])
+  @@index([familyId])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  actorUserId    String?      @db.Uuid
+  action         String       @db.VarChar(120)
+  resourceType   String       @db.VarChar(80)
+  resourceId     String?      @db.VarChar(120)
+  requestId      String?      @db.VarChar(120)
+  metadata       Json?
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  actor           User?       @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, createdAt(sort: Desc)])
+  @@index([organizationId, resourceType, resourceId])
+  @@index([actorUserId])
+}
+
+model IdempotencyKey {
+  id                 String            @id @default(uuid()) @db.Uuid
+  organizationId     String            @db.Uuid
+  operation          String            @db.VarChar(120)
+  key                String            @db.VarChar(160)
+  requestFingerprint String            @db.VarChar(128)
+  status             IdempotencyStatus @default(IN_PROGRESS)
+  responseStatus     Int?
+  responseBody       Json?
+  createdAt          DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime          @updatedAt @db.Timestamptz(6)
+  expiresAt          DateTime          @db.Timestamptz(6)
+  organization       Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, operation, key])
+  @@index([organizationId, status, createdAt])
+  @@index([organizationId, expiresAt])
+}
+
+model Counter {
+  organizationId String       @db.Uuid
+  name           String       @db.VarChar(80)
+  value          BigInt       @default(0)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@id([organizationId, name])
+  @@index([organizationId, updatedAt])
+}
+
+model Job {
+  id                String       @id @default(uuid()) @db.Uuid
+  organizationId    String       @db.Uuid
+  reference         String       @db.VarChar(32)
+  title             String       @db.VarChar(160)
+  description       String?      @db.VarChar(2000)
+  address           String?      @db.VarChar(255)
+  latitude          Decimal      @db.Decimal(9, 6)
+  longitude         Decimal      @db.Decimal(9, 6)
+  priority          JobPriority  @default(NORMAL)
+  status            JobStatus    @default(PENDING)
+  slaState          SlaState     @default(OK)
+  currentAssigneeId String?      @db.Uuid
+  createdById       String       @db.Uuid
+  version           Int          @default(1)
+  dueAt             DateTime     @db.Timestamptz(6)
+  completedAt       DateTime?    @db.Timestamptz(6)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime     @updatedAt @db.Timestamptz(6)
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  assignments       Assignment[]
+  events            JobEvent[]
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, status, priority, dueAt])
+  @@index([organizationId, slaState, dueAt])
+  @@index([organizationId, currentAssigneeId, status])
+}
+
+model Assignment {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @db.Uuid
+  jobId          String          @db.Uuid
+  agentId        String          @db.Uuid
+  state          AssignmentState @default(OFFERED)
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(6)
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  job            Job             @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, jobId, createdAt])
+  @@index([organizationId, agentId, state])
+}
+
+model JobEvent {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  jobId          String       @db.Uuid
+  actorUserId    String?      @db.Uuid
+  fromStatus     JobStatus?
+  toStatus       JobStatus
+  reason         String?      @db.VarChar(500)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  job            Job          @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, jobId, createdAt])
+}
