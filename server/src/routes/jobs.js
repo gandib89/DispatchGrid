@@ -6,13 +6,12 @@ import { actorFrom, authorize } from '../middleware/authorize.js'
 import { resolveTenant } from '../middleware/resolve-tenant.js'
 import { auditLog } from '../middleware/audit-log.js'
 import { jobSchemas } from '../../../shared/job-schema.js'
-import { createJob } from '../services/job-service.js'
+import { cancelJob, completeJob, createJob, failJob, patchJob, startJob } from '../services/job-service.js'
 import { scopedJob } from '../services/transaction.js'
 import { serializeJob } from '../serializers/job-serializer.js'
 
-// Seams for T2-T4 (not built here): transitions (PATCH, assign/accept/decline/
-// start/complete/cancel/fail), suggestions, timeline/events. They reuse this
-// pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
+// Seams for T3-T4 (not built here): assignment (assign/accept/decline),
+// suggestions, timeline/events. They reuse this pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
 // actorFrom -> service -> serialize -> respond), call invalidateBoardCache
 // after every committed write, and attach post-commit queue/socket hooks after
 // the service promise resolves — never inside the transaction.
@@ -171,6 +170,172 @@ router.get(
     try {
       const params = schemas.jobIdParamsSchema.parse(req.params)
       const job = await scopedJob(prisma, actorFrom(req), params.id)
+      res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Contested-write transitions: parse, build actor, call service, serialize,
+// respond, then invalidate the tenant board cache. Business rules live in
+// job-service; handlers only translate HTTP to service calls.
+router.patch(
+  '/:id',
+  authenticate,
+  resolveTenant(),
+  authorize('job.update'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const input = schemas.updateJobSchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, replay } = await patchJob(actor, params.id, input, {
+        key: idempotencyKeyFrom(req),
+      })
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'PATCH /jobs/:id',
+        resourceType: 'job',
+        resourceId: job.id,
+      }
+      res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+router.post(
+  '/:id/start',
+  authenticate,
+  resolveTenant(),
+  authorize('job.respond'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const input = schemas.versionOnlySchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, replay } = await startJob(
+        actor,
+        params.id,
+        { version: input.version, key: idempotencyKeyFrom(req) },
+      )
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/start',
+        resourceType: 'job',
+        resourceId: job.id,
+      }
+      res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+router.post(
+  '/:id/complete',
+  authenticate,
+  resolveTenant(),
+  authorize('job.respond'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const input = schemas.completeJobSchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, replay } = await completeJob(
+        actor,
+        params.id,
+        { version: input.version, key: idempotencyKeyFrom(req) },
+      )
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/complete',
+        resourceType: 'job',
+        resourceId: job.id,
+      }
+      res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+router.post(
+  '/:id/cancel',
+  authenticate,
+  resolveTenant(),
+  authorize('job.cancel'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const input = schemas.cancelJobSchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, replay } = await cancelJob(
+        actor,
+        params.id,
+        { version: input.version, reason: input.reason, key: idempotencyKeyFrom(req) },
+      )
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/cancel',
+        resourceType: 'job',
+        resourceId: job.id,
+      }
+      res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+router.post(
+  '/:id/fail',
+  authenticate,
+  resolveTenant(),
+  authorize('job.respond'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const input = schemas.failJobSchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { job, replay } = await failJob(
+        actor,
+        params.id,
+        { version: input.version, reason: input.reason, key: idempotencyKeyFrom(req) },
+      )
+      invalidateBoardCache(actor.organizationId)
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/fail',
+        resourceType: 'job',
+        resourceId: job.id,
+      }
       res.json({ job: serializeJob(job) })
     } catch (error) {
       next(error)
