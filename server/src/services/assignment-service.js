@@ -2,6 +2,7 @@ import { prisma } from '../db/client.js'
 import {
   agentNotEligible,
   alreadyAssigned,
+  badRequest,
   forbidden,
   invalidTransition,
   notFound,
@@ -334,3 +335,111 @@ export async function declineJob(actor, jobId, input = {}) {
 
   return { ...data, replay }
 }
+
+
+export async function reassignJob(actor, jobId, newAgentUserId, expectedVersion, reason, options = {}) {
+  requirePermission(actor, 'job.assign')
+
+  if (typeof reason !== 'string' || reason.trim().length === 0) {
+    throw badRequest('A reason is required to reassign a job')
+  }
+
+  const membership = await scopedMembership(actor, newAgentUserId)
+
+  const { data, replay } = await runIdempotent({
+    operation: 'job.reassign',
+    organizationId: actor.organizationId,
+    key: options.key,
+    fingerprintSource: { jobId, newAgentUserId, expectedVersion, reason },
+    responseStatus: 200,
+    execute: async (tx) => {
+      const locked = await lockMembership(tx, actor, newAgentUserId)
+      if (!locked) {
+        throw agentNotEligible('This agent cannot take this job', {
+          reasons: ['unknown_membership'],
+        })
+      }
+
+      const organization = await tx.organization.findUniqueOrThrow({
+        where: { id: actor.organizationId },
+      })
+      const activeJobCount = await activeAssignmentCount(tx, actor, newAgentUserId)
+      const eligibility = checkAgentEligibility({
+        membership,
+        organizationId: actor.organizationId,
+        activeJobCount,
+        defaultCap: organization.defaultConcurrentJobCap,
+      })
+      if (!eligibility.eligible) {
+        throw agentNotEligible('This agent cannot take this job', {
+          reasons: eligibility.reasons,
+        })
+      }
+
+      const job = await scopedJob(tx, actor, jobId)
+      if (job.status !== 'ASSIGNED') {
+        throw invalidTransition(`Only assigned jobs can be reassigned, not ${job.status}`)
+      }
+
+      const claimed = await tx.job.updateMany({
+        where: { id: jobId, organizationId: actor.organizationId, version: expectedVersion, status: 'ASSIGNED' },
+        data: { status: 'ASSIGNED', version: job.version + 1, currentAssigneeId: newAgentUserId },
+      })
+      if (claimed.count === 0) {
+        const fresh = await tx.job.findFirst({
+          where: { id: jobId, organizationId: actor.organizationId },
+        })
+        if (!fresh) {
+          throw notFound('Job not found')
+        }
+        throw versionConflict('The job changed since it was read', {
+          currentVersion: fresh.version,
+          currentStatus: fresh.status,
+        })
+      }
+
+      await tx.assignment.updateMany({
+        where: {
+          organizationId: actor.organizationId,
+          jobId,
+          state: { in: ACTIVE_ASSIGNMENT_STATES },
+        },
+        data: { state: 'REVOKED' },
+      })
+
+      let assignment
+      try {
+        assignment = await tx.assignment.create({
+          data: {
+            organizationId: actor.organizationId,
+            jobId,
+            agentId: newAgentUserId,
+            state: 'OFFERED',
+          },
+        })
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw alreadyAssigned('This job already has an active assignment')
+        }
+        throw error
+      }
+
+      await tx.jobEvent.create({
+        data: {
+          organizationId: actor.organizationId,
+          jobId,
+          actorUserId: actor.userId,
+          fromStatus: 'ASSIGNED',
+          toStatus: 'ASSIGNED',
+          reason,
+        },
+      })
+
+      const updated = await tx.job.findUniqueOrThrow({ where: { id: jobId } })
+      return { job: toPlain(updated), assignment: toPlain(assignment) }
+    },
+  })
+
+  return { ...data, replay }
+}
+
