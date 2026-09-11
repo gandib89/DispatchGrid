@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { seedDatabase } from '../../prisma/seed.js'
 import { prisma } from '../db/client.js'
 import { createJob } from './job-service.js'
-import { assignJob } from './assignment-service.js'
+import { assignJob, lockMembership } from './assignment-service.js'
 import {
   createOwnerTestClient,
   resetDatabase,
@@ -236,5 +236,48 @@ describe('assignJob offer path', () => {
     expect(second.replay).toBe(true)
     expect(second.job).toEqual(first.job)
     expect(await ownerDatabase.assignment.count({ where: { jobId: job.id } })).toBe(1)
+  })
+
+  it('reads eligibility inside the tx: cap override of 1 with 1 active row rejects at_cap', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    await ownerDatabase.membership.updateMany({
+      where: { userId: agent.userId },
+      data: { concurrentJobCap: 1 },
+    })
+    await activeAssignmentsFor(dispatcher, agent.userId, 1)
+    const job = await pendingJob(dispatcher, 'offer-locked-cap')
+
+    const error = await assignJob(dispatcher, job.id, agent.userId, 1, {
+      key: 'offer-locked-cap-2',
+    }).catch((e) => e)
+    expect(error.code).toBe('agent_not_eligible')
+    expect(error.details.reasons).toContain('at_cap')
+  })
+
+  it('lockMembership returns the fresh row with availability, cap, and role name', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agent = await buildActor(agentEmail)
+    await ownerDatabase.membership.updateMany({
+      where: { userId: agent.userId },
+      data: { isAvailable: true, concurrentJobCap: 7 },
+    })
+
+    const locked = await prisma.$transaction((tx) =>
+      lockMembership(tx, dispatcher, agent.userId),
+    )
+    expect(locked).toMatchObject({
+      userId: agent.userId,
+      organizationId: dispatcher.organizationId,
+      isAvailable: true,
+      concurrentJobCap: 7,
+    })
+    expect(locked.role?.name).toBe('AGENT')
+    expect(locked.roleName).toBe('AGENT')
+
+    const unknown = await prisma.$transaction((tx) =>
+      lockMembership(tx, dispatcher, '00000000-0000-0000-0000-000000000000'),
+    )
+    expect(unknown).toBeNull()
   })
 })

@@ -114,7 +114,12 @@ describe('acceptJob', () => {
     const error = await acceptJob(other, job.id, { version: 2, key: 'accept-cross' }).catch(
       (caught) => caught,
     )
-    expect(error.code).toBe('forbidden')
+    // Lost race surfaces as 409 with current state, not 403: the probe
+    // learns the job moved so it can re-read and retry elsewhere.
+    expect(error.code).toBe('version_conflict')
+    expect(error.status).toBe(409)
+    expect(error.details.currentVersion).toBe(2)
+    expect(error.details.currentStatus).toBe('ASSIGNED')
 
     const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
     expect(fresh.status).toBe('ASSIGNED')
@@ -255,7 +260,11 @@ describe('declineJob', () => {
     const error = await declineJob(other, job.id, { version: 2, key: 'decline-cross' }).catch(
       (caught) => caught,
     )
-    expect(error.code).toBe('forbidden')
+    // Lost race surfaces as 409 with current state, not 403.
+    expect(error.code).toBe('version_conflict')
+    expect(error.status).toBe(409)
+    expect(error.details.currentVersion).toBe(2)
+    expect(error.details.currentStatus).toBe('ASSIGNED')
 
     const fresh = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
     expect(fresh.status).toBe('ASSIGNED')

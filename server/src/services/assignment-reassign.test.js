@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { seedDatabase } from '../../prisma/seed.js'
 import { prisma } from '../db/client.js'
 import { createJob } from './job-service.js'
-import { assignJob, reassignJob } from './assignment-service.js'
+import { assignJob, reassignJob, acceptJob } from './assignment-service.js'
 import {
   createOwnerTestClient,
   resetDatabase,
@@ -162,6 +162,22 @@ describe('reassignJob', () => {
       key: 'reassign-pending-key',
     }).catch((e) => e)
     expect(error.code).toBe('invalid_transition')
+  })
+
+  it('conflicts with current state when reassigning after accept (sequential loser)', async () => {
+    const dispatcher = await buildActor(dispatcherEmail)
+    const agentA = await buildActor(agentEmail)
+    const agentB = await createAvailableAgent(dispatcher, 'after-accept')
+    const job = await assignedJob(dispatcher, agentA.userId, 'reassign-after-accept')
+    await acceptJob(agentA, job.id, { version: 2, key: 'reassign-after-accept-ok' })
+
+    const error = await reassignJob(dispatcher, job.id, agentB.id, 2, REASON, {
+      key: 'reassign-after-accept-key',
+    }).catch((e) => e)
+    expect(error.code).toBe('version_conflict')
+    expect(error.status).toBe(409)
+    expect(error.details.currentVersion).toBe(3)
+    expect(error.details.currentStatus).toBe('ACCEPTED')
   })
 
   it('refuses an ineligible or over-cap target agent', async () => {
