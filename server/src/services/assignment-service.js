@@ -2,7 +2,6 @@ import { prisma } from '../db/client.js'
 import {
   agentNotEligible,
   alreadyAssigned,
-  invalidTransition,
   notFound,
   versionConflict,
 } from '../errors/http-errors.js'
@@ -80,7 +79,15 @@ export async function assignJob(actor, jobId, agentUserId, expectedVersion, opti
 
       const job = await scopedJob(tx, actor, jobId)
       if (job.status !== 'PENDING') {
-        throw invalidTransition(`Only pending jobs can be offered, not ${job.status}`)
+        // Race contract (B09-T2): a loser that reads the job after the winner
+        // committed must still receive a 409 with current state, never a 422.
+        // The atomic version-plus-status claim below is the correctness guard
+        // for the true concurrent window; this fast path only normalizes the
+        // already-decided outcome to the same conflict shape.
+        throw versionConflict('The job changed since it was read', {
+          currentVersion: job.version,
+          currentStatus: job.status,
+        })
       }
 
       const claimed = await tx.job.updateMany({
