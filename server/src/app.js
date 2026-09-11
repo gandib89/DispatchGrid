@@ -10,6 +10,7 @@ import { logger } from './lib/logger.js'
 import { requestContextMiddleware } from './lib/request-context.js'
 import { apiLimiter } from './lib/rate-limit.js'
 import authRouter from './routes/auth.js'
+import jobsRouter from './routes/jobs.js'
 import organizationsRouter from './routes/organizations.js'
 
 export const app = express()
@@ -34,6 +35,7 @@ app.get('/healthz', (_request, response) => {
 
 app.use(config.apiPrefix, apiLimiter)
 app.use(`${config.apiPrefix}/auth`, authRouter)
+app.use(`${config.apiPrefix}/jobs`, jobsRouter)
 app.use(`${config.apiPrefix}/organizations`, organizationsRouter)
 
 app.use(config.apiPrefix, (_request, _response, next) => {
