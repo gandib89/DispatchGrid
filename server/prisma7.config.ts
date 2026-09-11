@@ -11,5 +11,8 @@ export default defineConfig({
   },
   datasource: {
     url: process.env["DATABASE_URL"],
+    shadowDatabaseUrl:
+      process.env["SHADOW_DATABASE_URL"] ??
+      "postgresql://postgres:postgres@localhost:55432/dispatchgrid_shadow?schema=public",
   },
 });

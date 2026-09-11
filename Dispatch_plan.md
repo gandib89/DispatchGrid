@@ -312,7 +312,8 @@ This inventory is derived only from `Dispatch.md` §§5, 8, 10, 17, and 19. Trea
 | `server/src/db/with-tenant.js` | `[ADAPTED]` | Actually wire it around raw counter SQL |
 | `server/src/lib/rate-limit.js` | `[ADAPTED]` | Keep mechanism and existing limiters; add per-agent ping limiter |
 | `server/src/routes/organizations.js` | `[ADAPTED]` | Keep base org routes; add invitation endpoints |
-| `server/src/serializers/*` | `[ADAPTED/NEW]` | Preserve boundary rule; create job/assignment shapes |
+| LedgerLine serializer pattern | `[REUSED]` | Preserve the rule that serializers convert internal data to safe response data |
+| DispatchGrid serializer files | `[NEW]` | Create job, assignment, event, and organization response shapes |
 | `client/src/components/AppShell.jsx` | `[ADAPTED]` | Host authenticated socket lifecycle and offline banner |
 | client MSW handlers | `[ADAPTED]` | Replace LedgerLine resources with DispatchGrid contracts |
 
@@ -390,6 +391,1262 @@ breachAt  = dueAt + breachMinutesAfter
 ```
 
 With `breachMinutesAfter = 0`, the examples that breach exactly at `dueAt` remain correct. If you instead remove the offset and always breach at `dueAt`, remove the unused field so the policy does not promise behavior the worker ignores.
+
+---
+
+## Beginner-first construction walkthrough
+
+This is the section to follow while you are writing the project. The later **Component construction guide** is the deeper technical reference. You do not need to understand every advanced word in that reference before starting.
+
+### How to read each component
+
+Every component below uses the same five-part pattern:
+
+1. **Simple goal** — what you are making in normal words.
+2. **Highlighted tree** — only files used by this component are shown and labelled.
+3. **Create order** — the exact order in which to copy, change, or create those files.
+4. **What goes inside** — the main sections/functions the file needs. This is a structure, not finished code.
+5. **Stop check** — prove the small piece works before moving forward.
+
+Do not create all empty files at the beginning. An empty file gives the appearance of progress but does not prove a dependency works. Create files in the order shown for the current component, make the stop checks pass, and only then move to the next component.
+
+The beginner components use IDs `B00`–`B19`. Each one maps directly to the detailed component with the same number (`B09` → `C09`, for example). Start with the B section while coding. Open the matching C section only when you need the deeper reason, edge cases, or interview explanation.
+
+### How to use a LedgerLine file
+
+LedgerLine is your starting kit. It contains production patterns that DispatchGrid needs, but it also contains accounting code that DispatchGrid does not need.
+
+#### `[REUSED]` means copy and keep
+
+Use this process:
+
+1. Find the file at the listed path in LedgerLine.
+2. Copy it to the same relative path in DispatchGrid.
+3. Read it from top to bottom. Make sure you can name its purpose.
+4. Run its tests or the component stop check.
+5. Do not rename variables or “clean it up” just for style. A reused file should remain known-good.
+
+Example:
+
+```text
+LedgerLine/server/src/lib/tx.js
+                 ↓ copy
+DispatchGrid/server/src/lib/tx.js                  [REUSED]
+```
+
+You may call an existing helper with a new DispatchGrid error code without changing the helper file. It is still `[REUSED]`.
+
+#### `[ADAPTED]` means copy first, then make named changes
+
+Use this process:
+
+1. Copy the LedgerLine file first. Do not start from a blank file.
+2. Confirm the copied version still runs.
+3. Make only the changes named in this guide.
+4. Change one group at a time, such as `Tenant` → `Organization`, then run a check.
+5. Keep the useful shape: exports, error handling, test setup, and control flow.
+
+Example:
+
+```text
+LedgerLine/server/src/env.js
+                 ↓ copy
+DispatchGrid/server/src/env.js                     [ADAPTED]
+                 ↓ change only the key list
+add Redis, GCS, runtime DB, and optional Gemini settings
+```
+
+The purpose is reuse with understanding—not blind copy/paste. At the end, write one sentence in your notes saying what stayed the same and what changed.
+
+#### `[NEW]` means DispatchGrid must own the design
+
+Use LedgerLine's general patterns, but do not copy its accounting resource and rename fields.
+
+For a new route/service pair:
+
+```text
+route
+  1. parse input
+  2. create actor from request
+  3. call service
+  4. serialize result
+  5. respond
+  6. perform allowed after-commit work
+
+service
+  1. check business rules
+  2. lock or compare versions when needed
+  3. write all related database rows in one transaction
+  4. return plain domain data
+```
+
+#### Never copy these LedgerLine files
+
+- `server/src/lib/decimal.js`
+- `server/src/routes/example-resource.js`
+- `server/src/routes/example-resource.test.js`
+- `client/src/pages/ThingsPage.jsx`
+- LedgerLine journal, posting, balance, and accounting logic
+- LedgerLine `index.css`
+
+They solve accounting problems, not dispatch problems.
+
+### Complete target project tree
+
+This is the whole target shape. Do not build it all at once. The small trees under B00–B19 highlight only the files to touch for the current component.
+
+```text
+dispatchgrid/
+├── docker-compose.yml
+├── Dockerfile
+├── README.md
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── docs/
+│   ├── decisions.md
+│   └── domain.md
+├── shared/
+│   ├── organization-schema.js
+│   ├── job-schema.js
+│   ├── invitation-schema.js
+│   ├── sla-schema.js
+│   └── queue-schema.js
+├── server/
+│   ├── package.json
+│   ├── eslint.config.js
+│   ├── vitest.config.js
+│   ├── .env.example
+│   ├── prisma/
+│   │   ├── schema.prisma
+│   │   ├── seed.js
+│   │   └── migrations/
+│   │       └── optional_rls/
+│   └── src/
+│       ├── config.js
+│       ├── env.js
+│       ├── app.js
+│       ├── index.js
+│       ├── worker.js
+│       ├── errors/
+│       │   └── http-errors.js
+│       ├── auth/
+│       │   └── LedgerLine's five auth files
+│       ├── middleware/
+│       │   └── authenticate, resolve-tenant, authorize, audit-log
+│       ├── db/
+│       │   ├── client.js
+│       │   ├── tenant-extension.js
+│       │   └── with-tenant.js
+│       ├── lib/
+│       │   ├── log-redact.js
+│       │   ├── request-context.js
+│       │   ├── tx.js
+│       │   ├── sequence.js
+│       │   ├── idempotency.js
+│       │   ├── cookies.js
+│       │   ├── rate-limit.js
+│       │   ├── jobs/
+│       │   │   ├── state-machine.js
+│       │   │   ├── eligibility.js
+│       │   │   └── suggestion-scoring.js
+│       │   ├── queue/
+│       │   │   └── index.js
+│       │   ├── realtime/
+│       │   │   └── socket-server.js
+│       │   ├── tracking/
+│       │   │   └── position-cache.js
+│       │   ├── files/
+│       │   │   └── signed-url.js
+│       │   ├── notifications/
+│       │   │   └── email-stub.js
+│       │   └── ai/
+│       │       └── rationale.js
+│       ├── routes/
+│       │   ├── auth.js
+│       │   ├── organizations.js
+│       │   ├── jobs.js
+│       │   ├── pings.js
+│       │   ├── uploads.js
+│       │   ├── sla-policies.js
+│       │   ├── notifications.js
+│       │   ├── admin-dead-letter.js
+│       │   └── reports.js
+│       ├── services/
+│       │   ├── job-service.js
+│       │   ├── assignment-service.js
+│       │   └── invitation-service.js
+│       ├── serializers/
+│       │   ├── job-serializer.js
+│       │   └── organization-serializer.js
+│       ├── worker/
+│       │   └── handlers/
+│       │       ├── job-events.js
+│       │       ├── sla-sweep.js
+│       │       ├── notifications.js
+│       │       └── reconciliation.js
+│       └── test/
+│           ├── helpers.js
+│           ├── assign-race.test.js
+│           └── transitions.property.test.js
+└── client/
+    ├── package.json
+    ├── tailwind.config.js
+    └── src/
+        ├── main.jsx
+        ├── query-client.js
+        ├── lib/
+        │   ├── api-client.js
+        │   └── socket-client.js
+        ├── auth/
+        │   └── LedgerLine auth context files
+        ├── components/
+        │   ├── AppShell.jsx
+        │   ├── ProtectedRoute.jsx
+        │   ├── AsyncState.jsx
+        │   ├── ToastProvider.jsx
+        │   ├── JobCard.jsx
+        │   ├── AssignDialog.jsx
+        │   ├── JobTimeline.jsx
+        │   └── JobMap.jsx
+        ├── hooks/
+        │   ├── use-jobs.js
+        │   ├── use-suggestions.js
+        │   └── use-realtime.js
+        ├── pages/
+        │   ├── LoginPage.jsx
+        │   ├── RegisterPage.jsx
+        │   ├── JobsBoardPage.jsx
+        │   ├── JobDetailPage.jsx
+        │   ├── AgentJobsPage.jsx
+        │   ├── AgentMapPage.jsx
+        │   ├── MembersPage.jsx
+        │   ├── SLAPoliciesPage.jsx
+        │   └── ReportsPage.jsx
+        ├── mocks/
+        │   └── setup plus API handlers
+        └── test/
+            └── setup and render helpers
+```
+
+The source document calls the shared organization schema `tenant-schema.js`. This walkthrough uses the clearer target name `organization-schema.js`. If you keep `tenant-schema.js` for exact LedgerLine path compatibility, do so consistently and record it; do not keep both files with duplicate schemas.
+
+---
+
+## B00 — Understand and lock the project rules
+
+### Simple goal
+
+Write down what DispatchGrid is allowed to do before code makes those choices hard to change.
+
+### Files highlighted for this component
+
+```text
+dispatchgrid/
+└── docs/
+    ├── decisions.md                                  [NEW]
+    └── domain.md                                     [NEW]
+```
+
+### Create in this order
+
+| Order | File | Action | What goes inside | Why this comes now |
+|---|---|---|---|---|
+| 1 | `docs/domain.md` | `[NEW]` | Actors, repair-job example, job states, words like assignment/SLA/escalation | You need to understand the business before naming code |
+| 2 | `docs/decisions.md` | `[NEW]` | Fixed ADR list, accepted recommendations, A-1 `FAILED` choice, A-9 Redis check, cut list | It stops you from silently changing the architecture later |
+
+### Stop check
+
+- [ ] You can explain Org Admin, Dispatcher, Agent, and Worker without looking.
+- [ ] You decided whether `FAILED` is a real state or removed.
+- [ ] You can say in one sentence why Gemini does not make assignments.
+
+### What exists now
+
+You have no running code. You have something equally important: a clear border around the project.
+
+---
+
+## B01 — Make the project start locally
+
+### Simple goal
+
+Start the API and its local PostgreSQL/Redis services. Do not add job code yet.
+
+### Files highlighted for this component
+
+```text
+dispatchgrid/
+├── docker-compose.yml                                [REUSED]
+├── shared/                                           [NEW]
+├── server/
+│   ├── package.json                                  [ADAPTED]
+│   ├── eslint.config.js                              [REUSED]
+│   ├── vitest.config.js                              [REUSED]
+│   ├── .env.example                                  [ADAPTED]
+│   └── src/
+│       ├── config.js                                 [REUSED]
+│       ├── env.js                                    [ADAPTED]
+│       ├── app.js                                    [ADAPTED]
+│       ├── index.js                                  [ADAPTED]
+│       ├── errors/http-errors.js                     [REUSED]
+│       └── lib/
+│           ├── log-redact.js                         [REUSED]
+│           ├── request-context.js                    [REUSED]
+│           └── tx.js                                 [REUSED]
+└── client/
+    └── package.json                                  [ADAPTED]
+```
+
+### Create or copy in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `docker-compose.yml` `[REUSED]` | Healthy Postgres 16 and Redis 7 services | The rest of the backend needs these processes |
+| 2 | both `package.json` files `[ADAPTED]` | Scripts and initial dependencies; add domain packages only when their component begins | Package tools must exist before imports can resolve |
+| 3 | `server/.env.example` `[ADAPTED]` | Names of required settings, never real secrets | `env.js` needs a clear contract |
+| 4 | `server/src/env.js` `[ADAPTED]` | Read `process.env`, validate, export settings | Every later file gets safe settings from one place |
+| 5 | `config.js`, `http-errors.js`, logging/context/tx `[REUSED]` | Copy exactly from LedgerLine | These are independent building blocks |
+| 6 | `server/src/app.js` `[ADAPTED]` | Build Express app, add `/healthz`, export app, never call `listen()` | Tests need to import the app without opening a port |
+| 7 | `server/src/index.js` `[ADAPTED]` | Import app, call `listen()`, handle shutdown | Listening is last because it depends on the app |
+| 8 | lint/test configs `[REUSED]` | Copy and run | They verify the new skeleton |
+
+### File shape to remember
+
+```text
+env.js:    imports → validation schema → parsed environment → exported config
+app.js:    imports → create Express app → middleware → health route → error handler → export
+index.js:  imports → create HTTP server → listen → SIGTERM cleanup
+```
+
+### Stop check
+
+- [ ] Postgres and Redis are healthy.
+- [ ] Missing `JWT_SECRET` causes a clear startup error.
+- [ ] `/healthz` returns 200.
+- [ ] Importing `app.js` does not open a port.
+
+### What exists now
+
+The project starts and stops cleanly. It still knows nothing about users or jobs.
+
+---
+
+## B02 — Build the database and organization wall
+
+### Simple goal
+
+Create the basic tables and make it hard for one company to read another company's data.
+
+### Files highlighted for this component
+
+```text
+server/
+├── prisma/
+│   ├── schema.prisma                                  [ADAPTED]
+│   ├── seed.js                                        [ADAPTED]
+│   └── migrations/optional_rls/                       [ADAPTED]
+└── src/
+    ├── db/
+    │   ├── client.js                                  [REUSED]
+    │   ├── tenant-extension.js                        [ADAPTED]
+    │   └── with-tenant.js                             [ADAPTED]
+    └── test/helpers.js                                [REUSED]
+```
+
+### Create or copy in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `schema.prisma` `[ADAPTED]` | Organization, User, Membership, Role, Permission, RolePermission, RefreshToken, AuditLog, IdempotencyKey, Counter | The client and seed need models first |
+| 2 | first migration `[ADAPTED]` | SQL generated from the backbone schema | The real database must match the schema |
+| 3 | `db/client.js` `[REUSED]` | LedgerLine Prisma client creation | Other database helpers depend on the client |
+| 4 | `tenant-extension.js` `[ADAPTED]` | Change tenant column to `organizationId`; keep automatic model discovery | Normal Prisma queries need automatic organization filtering |
+| 5 | `with-tenant.js` and RLS migration `[ADAPTED]` | Set database organization context for raw Counter SQL; restricted runtime role | Raw SQL can bypass the Prisma extension, so it needs a second wall |
+| 6 | `seed.js` `[ADAPTED]` | Permission codes, three roles, two organizations; use upserts | Tests and manual checks need known data |
+| 7 | `test/helpers.js` `[REUSED]` | Copy schema-derived reset and user/org factories | Tests now have a database they can safely reset |
+
+### File shape to remember
+
+```text
+schema.prisma: generator/datasource → enums → global models → organization models → indexes
+tenant-extension.js: find scoped models → read organization context → add organizationId to queries
+with-tenant.js: start transaction → set DB tenant value → run callback → commit/rollback
+seed.js: permissions → roles → role-permission links → organizations → demo users
+```
+
+### Stop check
+
+- [ ] Running the seed twice does not duplicate rows.
+- [ ] The app connects with a non-superuser runtime role.
+- [ ] A raw query under Organization A cannot read Organization B's Counter.
+- [ ] Runtime code consistently says `Organization`/`organizationId`.
+
+### What exists now
+
+The database knows about companies, users, and roles. No one can log in yet.
+
+---
+
+## B03 — Add login and safe refresh tokens
+
+### Simple goal
+
+Let a person register, log in, stay signed in, and log out safely.
+
+### Files highlighted for this component
+
+```text
+server/src/
+├── auth/                                              [REUSED]
+│   └── LedgerLine's five password/token/login files
+├── lib/cookies.js                                     [REUSED]
+└── routes/auth.js                                     [REUSED]
+```
+
+### Copy in this order
+
+| Order | File/group | What to do | Why this order |
+|---|---|---|---|
+| 1 | password helper `[REUSED]` | Copy Argon2id hash/verify code | Registration and login both need it |
+| 2 | access-token helper `[REUSED]` | Copy JWT sign/verify with fixed algorithm | Login needs to create access tokens |
+| 3 | refresh-token helper `[REUSED]` | Copy random token, hashing, family rotation/reuse logic | Login/refresh routes depend on it |
+| 4 | login/register services `[REUSED]` | Copy; adapt only `Tenant` naming if present | Core building blocks now exist |
+| 5 | `cookies.js` `[REUSED]` | Copy secure cookie settings | Routes need the same cookie rules |
+| 6 | `routes/auth.js` `[REUSED]` | Mount register/login/refresh/logout/me | Routes come after their services |
+| 7 | auth integration tests `[ADAPTED]` | Copy LedgerLine test structure, then change Tenant fixtures to Organization fixtures and run against real Postgres | Proves the whole chain works |
+
+### File shape to remember
+
+```text
+password helper: constants → hashPassword → verifyPassword → dummy hash
+token helper: token settings → sign access → verify access
+refresh service: hash lookup → reuse check → rotate family → return successor
+auth route: strict input → service call → set cookie → safe response
+```
+
+### Stop check
+
+- [ ] Register → login → `/auth/me` → refresh → logout works.
+- [ ] Reusing an old refresh token revokes the whole family.
+- [ ] Unknown email and wrong password return the same public error.
+
+### What exists now
+
+A person can enter DispatchGrid securely. Protected requests still need organization and permission resolution.
+
+---
+
+## B04 — Turn a logged-in user into an organization actor
+
+### Simple goal
+
+For every protected request, find the user's organization and permissions once.
+
+### Files highlighted for this component
+
+```text
+shared/
+└── organization-schema.js                            [ADAPTED]
+server/src/
+├── middleware/                                       [REUSED]
+│   └── authenticate, resolve-tenant, authorize, audit-log
+├── routes/organizations.js                           [ADAPTED]
+└── serializers/organization-serializer.js            [NEW]
+```
+
+### Create or copy in this order
+
+| Order | File/group | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | middleware group `[REUSED]` | Copy authentication, tenant resolution, permission check, audit middleware | Organization routes need this pipeline |
+| 2 | `organization-schema.js` `[ADAPTED]` | Request shapes for org create/member update | Route input must be defined before route code |
+| 3 | organization serializer `[NEW]` | Follow LedgerLine's serializer pattern; return safe org/member fields and dates as strings | The route should not return raw DB objects |
+| 4 | `routes/organizations.js` `[ADAPTED]` | List/create organizations; list/update members | Services and schemas are ready |
+| 5 | permission/isolation tests `[NEW]` | Follow LedgerLine's test style; cover the role × endpoint matrix and cross-org attempts | Proves the wall works through HTTP |
+
+### Request order to remember
+
+```text
+rate limit → authenticate user → resolve organization/membership
+→ load permission Set once → check required permission → route
+```
+
+### Stop check
+
+- [ ] Permission lookup runs once per request.
+- [ ] Agent cannot use an admin route.
+- [ ] Organization A cannot see Organization B's member list.
+- [ ] Cross-organization object lookup returns 404, not 403.
+
+### What exists now
+
+Every later route receives a safe actor: user, organization, membership, and permissions.
+
+---
+
+## B05 — Define the shared language between client and server
+
+### Simple goal
+
+Decide what valid requests, responses, dates, and errors look like before adding the job domain.
+
+### Files highlighted for this component
+
+```text
+shared/
+├── organization-schema.js                            [ADAPTED]
+└── job-schema.js                                     [NEW]
+server/src/
+├── errors/http-errors.js                             [REUSED]
+└── serializers/job-serializer.js                     [NEW]
+```
+
+### Create in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `shared/job-schema.js` `[NEW]` | Factory receiving `z`; job create/filter/id/version shapes; all objects strict | Routes and client must agree on input |
+| 2 | `http-errors.js` `[REUSED]` | No rewrite; use existing factories with DispatchGrid codes | Services need stable public errors |
+| 3 | `job-serializer.js` `[NEW]` | Date→ISO, allowed fields, nested assignment/event shapes | Routes need a safe response boundary |
+| 4 | schema/serializer tests `[NEW]` | Reject unknown fields; prove internal fields do not leak | Protects the boundary before routes multiply |
+
+### File shape to remember
+
+```text
+job-schema.js: export factory → small reusable fields → create schema → params/query → mutation schemas
+job-serializer.js: serializeJob → serializeAssignment → serializeEvent; no database query inside
+```
+
+### Stop check
+
+- [ ] Unknown request fields are rejected.
+- [ ] Dates leave the server as ISO strings.
+- [ ] Clients can branch on `error.code`, not message text.
+
+### What exists now
+
+The two sides speak the same language. There is still no job behavior.
+
+---
+
+## B06 — Write the job rules as small pure functions
+
+### Simple goal
+
+Teach the code which job moves are legal and which agents are eligible—without Express or the database.
+
+### Files highlighted for this component
+
+```text
+server/src/lib/jobs/
+├── state-machine.js                                  [NEW]
+├── eligibility.js                                    [NEW]
+└── suggestion-scoring.js                             [NEW]
+```
+
+### Create in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `state-machine.js` `[NEW]` | Transition map, `canTransition`, allowed-next-state list, readable error helper | Every state-changing service depends on it |
+| 2 | state-machine test `[NEW]` | Every legal and illegal move, including your A-1 decision | Prove rules before adding more logic |
+| 3 | `eligibility.js` `[NEW]` | Same org, agent role, available, below effective cap | Ranking must only receive eligible agents |
+| 4 | eligibility test `[NEW]` | Wrong org/role, unavailable, at cap, override/default | Makes hard rules trustworthy |
+| 5 | `suggestion-scoring.js` `[NEW]` | Haversine distance, load score, stable tie-break | Scoring comes after filtering |
+| 6 | scoring test `[NEW]` | Ties, zero agents, same point, antimeridian | Proves deterministic output |
+
+### File shape to remember
+
+```text
+state-machine: constants → transition map → query functions → assertion/message
+eligibility: effective cap → individual rule checks → combined result with reasons
+scoring: distance helper → score parts → total → stable sort
+```
+
+### Stop check
+
+- [ ] Pure tests need no database.
+- [ ] Same scoring input always gives the same order.
+- [ ] Gemini is imported nowhere here.
+- [ ] Exactly-at-cap agent is rejected.
+
+### What exists now
+
+The business brain exists. It cannot store jobs yet.
+
+---
+
+## B07 — Make PostgreSQL protect job truth
+
+### Simple goal
+
+Create Job, Assignment, and JobEvent tables with rules the database itself enforces.
+
+### Files highlighted for this component
+
+```text
+server/
+├── prisma/
+│   ├── schema.prisma                                  [ADAPTED]
+│   └── migrations/                                    [NEW]
+└── src/test/db/job-constraints.test.js                [NEW]
+```
+
+### Create in this order
+
+| Order | Part | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | Job enums/models in `schema.prisma` `[ADAPTED]` | Priority, JobStatus, SLA state, Job fields and `version` | Assignment and events point to Job |
+| 2 | Assignment model `[NEW]` | Add it inside the adapted Prisma schema; include offer history and active states | Partial index needs its table |
+| 3 | JobEvent model `[NEW]` | Add it inside the adapted Prisma schema; include actor/from/to/reason/time | Transition service will write it |
+| 4 | generated migration `[NEW]` | Tables, foreign keys, normal indexes | Base SQL must exist before custom SQL |
+| 5 | custom migration SQL `[NEW]` | CHECKs, active-assignment partial unique index, immutability trigger | Prisma schema cannot express every rule |
+| 6 | constraint test `[NEW]` | Intentionally break every CHECK/index/trigger | A constraint is only trusted after you see it reject bad data |
+
+### Database rules to see in the file
+
+```text
+Job: coordinates valid; reference unique per org; completedAt matches COMPLETED;
+     assignee matches status; board/SLA/assignee indexes lead with organizationId
+Assignment: only one OFFERED or ACCEPTED row per job
+JobEvent: UPDATE and DELETE always rejected
+```
+
+### Stop check
+
+- [ ] Two active assignments for one job fail in PostgreSQL.
+- [ ] Revoking the old assignment allows a new offer.
+- [ ] Updating or deleting JobEvent fails.
+- [ ] Every constraint has a red test that becomes green when the DB rejects the write.
+
+### What exists now
+
+PostgreSQL can hold the core domain and refuses its most dangerous impossible states.
+
+---
+
+## B08 — Create jobs safely and make retries harmless
+
+### Simple goal
+
+Create numbered jobs in one transaction and let clients safely retry a lost request.
+
+### Files highlighted for this component
+
+```text
+server/src/
+├── lib/
+│   ├── tx.js                                          [REUSED]
+│   ├── sequence.js                                    [REUSED]
+│   └── idempotency.js                                 [REUSED]
+├── db/with-tenant.js                                  [ADAPTED]
+├── services/job-service.js                            [NEW]
+└── serializers/job-serializer.js                     [NEW]
+```
+
+### Create or copy in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `tx.js` `[REUSED]` | Copy LedgerLine transaction wrapper | Services need transaction composition |
+| 2 | `sequence.js` `[REUSED]` | Copy Counter lock/increment helper | `createJob` needs a reference |
+| 3 | `with-tenant.js` `[ADAPTED]` | Wrap the Counter raw SQL with org context | Number allocation must remain tenant-safe |
+| 4 | `idempotency.js` `[REUSED]` | Copy key/fingerprint/SAVEPOINT logic | Create service must be retry-safe |
+| 5 | `job-service.js` `[NEW]` | `createJob`, patch/start/complete/cancel/fail-as-decided; every signature ends `tx = prisma` | All helpers are now ready |
+| 6 | service/integration tests `[NEW]` | Concurrent references, rollback without gap, replay, changed body, in-flight key | Proves transaction behavior |
+
+### `createJob` structure
+
+```text
+1. check actor/input
+2. start or receive transaction
+3. reserve idempotency key
+4. lock Counter and calculate reference
+5. insert Job
+6. insert first JobEvent
+7. store original response
+8. commit
+9. return data (no queue/socket work inside service)
+```
+
+### Stop check
+
+- [ ] Two concurrent creates get consecutive references.
+- [ ] Forced rollback leaves no missing number.
+- [ ] Same key/body returns the original result once.
+- [ ] Same key/different body returns 422.
+- [ ] Service files do not import `req`, `res`, queues, or sockets.
+
+### What exists now
+
+Dispatchers can create durable, numbered jobs through service code.
+
+---
+
+## B09 — Solve the two-dispatcher assignment race
+
+### Simple goal
+
+When two dispatchers assign the same job at the same time, let one win and clearly tell the other what happened.
+
+### Files highlighted for this component
+
+```text
+server/src/
+├── services/
+│   ├── job-service.js                                [NEW]
+│   └── assignment-service.js                         [NEW]
+└── test/
+    ├── assign-race.test.js                           [NEW]
+    └── transitions.property.test.js                  [NEW]
+```
+
+### Create in this order
+
+| Order | File/part | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `assignment-service.js` `[NEW]` | Effective-cap lookup, membership row lock, active-job count, assignment history writes | Job assignment needs safe agent checks |
+| 2 | `assignJob` in `job-service.js` `[NEW]` | Validate state/agent, lock agent, conditional version update, Assignment insert, JobEvent insert | Builds the complete transaction |
+| 3 | accept/decline/reassign methods `[NEW]` | Ownership checks and atomic Job+Assignment+Event updates | They share the assignment rules |
+| 4 | `assign-race.test.js` `[NEW]` | Send two parallel assignments with same version | Proves the main race |
+| 5 | property test `[NEW]` | Generate many transition attempts; impossible status/assignee pair never appears | Finds forgotten combinations |
+
+### Assignment transaction structure
+
+```text
+1. find job inside actor's organization
+2. check legal transition
+3. lock target Membership row
+4. count active jobs and check cap
+5. UPDATE Job WHERE id + version + PENDING
+6. if zero rows changed: return 409 version_conflict
+7. insert OFFERED Assignment
+8. if partial index rejects: return 409 already_assigned
+9. insert JobEvent
+10. commit
+```
+
+### Stop check
+
+- [ ] Twenty repeated race runs each produce one success and one 409.
+- [ ] Database ends with exactly one active Assignment.
+- [ ] Agent A cannot accept Agent B's offer.
+- [ ] Reassign vs accept produces one winner, not mixed state.
+- [ ] Agent cap cannot be exceeded by two simultaneous operations.
+
+### What exists now
+
+The load-bearing backend core is complete. Protect this component even if later optional features are cut.
+
+---
+
+## B10 — Expose the job system through REST
+
+### Simple goal
+
+Connect HTTP routes to the safe services and add the board read/cache.
+
+### Files highlighted for this component
+
+```text
+shared/job-schema.js                                  [NEW]
+server/src/
+├── app.js                                            [ADAPTED]
+├── routes/jobs.js                                    [NEW]
+├── serializers/job-serializer.js                    [NEW]
+└── test/
+    ├── routes/jobs.test.js                           [NEW]
+    ├── routes/isolation.test.js                      [NEW]
+    └── routes/permissions.test.js                    [NEW]
+```
+
+### Create in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | finish `job-schema.js` `[NEW]` | Schemas for all job route body/params/query | Route inputs come first |
+| 2 | finish serializer `[NEW]` | List/detail/assignment/event response shapes | Route outputs come next |
+| 3 | `routes/jobs.js` `[NEW]` | Middleware, strict parse, `actorFrom`, service call, serialize/respond, post-commit hooks | Services are already correct |
+| 4 | board cache helper inside jobs/lib or route support `[NEW]` | Follow cache-aside pattern for list only, 10s TTL, org-key invalidation | Add optimization after uncached query works |
+| 5 | mount in `app.js` `[ADAPTED]` | `/api/v1/jobs` router | Router must exist before mounting |
+| 6 | route/isolation/permission tests `[NEW]` | Every documented status, org 404, role matrix | Proves the public contract |
+
+### Route file structure
+
+```text
+imports → router → small Zod schemas → GET list → POST create → GET detail
+→ PATCH → assign/respond/start/complete/cancel → suggestions/events → export router
+```
+
+Every handler should be thin. Business rules belong in services. Queue/socket calls will be added later and must happen after the service promise succeeds.
+
+### Stop check
+
+- [ ] Full job lifecycle works through HTTP.
+- [ ] Every documented error code has a route test.
+- [ ] Job detail is not cached.
+- [ ] Board cache is tenant-keyed and invalidated after writes.
+- [ ] Another organization's job always looks missing (404).
+
+### What exists now
+
+DispatchGrid is a complete synchronous multi-tenant backend. Everything next adds time, delivery, live movement, or product UI.
+
+---
+
+## B11 — Add a queue and a separate worker
+
+### Simple goal
+
+Let slow or scheduled work run after the HTTP response and survive a worker restart.
+
+### Files highlighted for this component
+
+```text
+shared/queue-schema.js                                [NEW]
+server/src/
+├── worker.js                                         [NEW]
+├── lib/queue/index.js                                [NEW]
+└── worker/handlers/                                  [NEW]
+```
+
+### Create in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `queue-schema.js` `[NEW]` | Strict payload shapes with IDs, org ID, type, requestId | Producers/consumers need one contract |
+| 2 | `lib/queue/index.js` `[NEW]` | Redis connection, named queues, shared defaults, producer helpers | Worker and routes both need queue setup |
+| 3 | empty handler index/router `[NEW]` | Map payload type to handler; validate first | Worker needs somewhere to send work |
+| 4 | `worker.js` `[NEW]` | Config/logging/DB/Redis init, BullMQ Worker registration, graceful shutdown; no HTTP listen | All dependencies now exist |
+| 5 | queue integration test `[NEW]` | Enqueue, consume, correlate requestId, kill/restart | Proves the second process model |
+
+### File shape to remember
+
+```text
+queue/index.js: connection → queue names → queue objects → enqueue helpers → close helper
+worker.js: startup → handler registration → error events → SIGTERM drain
+handler: parse payload → reread PostgreSQL → safe transaction → return/throw
+```
+
+### Stop check
+
+- [ ] Malformed payload is rejected before DB code.
+- [ ] Worker log contains the original requestId.
+- [ ] Killing the worker causes redelivery after restart.
+- [ ] A queue failure cannot roll back an already committed job.
+
+### What exists now
+
+The System Worker is real. It has no useful job yet; SLA and notifications come next.
+
+---
+
+## B12 — Make SLA warnings and breaches happen by time
+
+### Simple goal
+
+Raise one durable warning or breach when the clock reaches a job's threshold, even if nobody is using the app.
+
+### Files highlighted for this component
+
+```text
+shared/sla-schema.js                                  [NEW]
+server/
+├── prisma/schema.prisma                              [ADAPTED]
+└── src/
+    ├── routes/sla-policies.js                        [NEW]
+    └── worker/handlers/sla-sweep.js                  [NEW]
+```
+
+### Create in this order
+
+| Order | File/part | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | SLAPolicy and Escalation models `[NEW]` | Add them inside the adapted schema; include policy thresholds and unique job+threshold escalation | Worker needs durable tables |
+| 2 | migration `[NEW]` | Tables, checks, unique constraint | Database must enforce duplicate safety |
+| 3 | `sla-schema.js` `[NEW]` | Policy inputs and queue payload | Route and worker share vocabulary |
+| 4 | `sla-policies.js` `[NEW]` | Admin list/create/update policy | Jobs need policies to schedule |
+| 5 | enqueue calls after assign `[NEW]` | Add these calls to the jobs route after commit; use warning/breach delayed IDs | Handler must have work to receive |
+| 6 | `sla-sweep.js` `[NEW]` | Parse, reread job, terminal no-op, update SLA state + insert escalation | All storage/producer pieces exist |
+| 7 | SLA tests `[NEW]` | No-HTTP trigger, double delivery, terminal no-op | Proves time behavior |
+
+### SLA handler structure
+
+```text
+parse payload → load current job → if terminal, finish safely
+→ calculate threshold from recorded policy rule → transaction
+→ update Job.slaState + insert unique Escalation → commit
+→ enqueue notification/publish later
+```
+
+### Stop check
+
+- [ ] A near-future SLA fires without an HTTP request.
+- [ ] Two deliveries create one Escalation.
+- [ ] Completed/cancelled job causes a safe no-op.
+- [ ] Warning/breach offset rule is written in `decisions.md` and tested.
+
+### What exists now
+
+DispatchGrid can react to time by itself.
+
+---
+
+## B13 — Send notifications, retry, and keep failures visible
+
+### Simple goal
+
+Try delivery several times without undoing the job, and keep permanent failures where an admin can inspect them.
+
+### Files highlighted for this component
+
+```text
+server/
+├── prisma/schema.prisma                               [ADAPTED]
+└── src/
+    ├── lib/notifications/email-stub.js                [NEW]
+    ├── worker/handlers/
+    │   ├── job-events.js                              [NEW]
+    │   ├── notifications.js                           [NEW]
+    │   └── reconciliation.js                          [NEW] [RECOMMENDATION]
+    └── routes/
+        ├── notifications.js                           [NEW]
+        └── admin-dead-letter.js                       [NEW]
+```
+
+### Create in this order
+
+| Order | File/part | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | Notification model/migration `[NEW]` | Recipient/type/state/attempts; unique job+type+recipient | Handler needs durable idempotency record |
+| 2 | `email-stub.js` `[NEW]` | `send(message)` interface that logs safe fields and can be forced to fail in tests | Handler needs an adapter |
+| 3 | `job-events.js` `[NEW]` | Convert job event type into recipient + notification type | Keeps delivery policy outside Jobs |
+| 4 | `notifications.js` `[NEW]` | Parse → check prior success → send → record; retry configuration | Core delivery behavior |
+| 5 | DLQ/admin route `[NEW]` | Read-only list of exhausted jobs | Failure must be visible |
+| 6 | `reconciliation.js` `[NEW]` `[RECOMMENDATION]` | Find committed business rows missing expected async consequence and re-enqueue | Repairs post-commit enqueue gap |
+| 7 | retry/double-delivery tests `[NEW]` | Five attempts, backoff, DLQ, same payload twice | Proves failure behavior |
+
+### Stop check
+
+- [ ] Notification failure does not change assignment or escalation.
+- [ ] Permanent failure appears in DLQ after five tries.
+- [ ] Repeated completed payload produces one recorded consequence.
+- [ ] Reconciliation repairs a deliberately failed enqueue if enabled.
+
+### What exists now
+
+Business truth and message delivery are properly separated.
+
+---
+
+## B14 — Accept and store agent locations
+
+### Simple goal
+
+Save a fast latest position for the map and a limited durable history for later review.
+
+### Files highlighted for this component
+
+```text
+server/
+├── prisma/schema.prisma                               [ADAPTED]
+└── src/
+    ├── lib/
+    │   ├── rate-limit.js                              [ADAPTED]
+    │   └── tracking/position-cache.js                 [NEW]
+    └── routes/pings.js                                [NEW]
+```
+
+### Create in this order
+
+| Order | File/part | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | LocationPing model/migration `[NEW]` | Org, agent, optional job, exact coordinates, accuracy, recorded time, tenant-leading index | Route needs durable target |
+| 2 | `rate-limit.js` `[ADAPTED]` | Add 120/hour limiter keyed by agent ID | Reject floods before writes |
+| 3 | `position-cache.js` `[NEW]` | Redis key/TTL, compare timestamps before set, get/fallback helpers | Route needs hot-store rules |
+| 4 | `pings.js` `[NEW]` | Auth/ownership, strict parse, limit, write history + latest, return accepted | Storage helpers are ready |
+| 5 | latest-positions route `[NEW]` | Add it to the chosen pings or agents router; read Redis first, PostgreSQL fallback, organization scoped | Dispatcher map needs reads |
+| 6 | tests `[NEW]` | 121st ping, old timestamp, cross-org, Redis miss | Proves hot/cold rules |
+
+### Stop check
+
+- [ ] Old ping cannot move map backward.
+- [ ] 121st ping returns 429 with `Retry-After`.
+- [ ] Redis miss reads the latest durable point.
+- [ ] Organization A cannot read Organization B's positions.
+
+### What exists now
+
+DispatchGrid knows where active agents were recently seen, with relaxed map consistency but durable history.
+
+---
+
+## B15 — Push live changes across two API instances
+
+### Simple goal
+
+Make a browser connected to API A receive an event caused by a request handled by API B.
+
+### Files highlighted for this component
+
+```text
+server/src/
+├── app.js                                            [ADAPTED]
+├── index.js                                          [ADAPTED]
+└── lib/realtime/socket-server.js                     [NEW]
+client/src/
+├── lib/socket-client.js                              [NEW]
+├── hooks/use-realtime.js                             [NEW]
+└── components/AppShell.jsx                           [ADAPTED]
+```
+
+### Create in this order
+
+| Order | File | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `socket-server.js` `[NEW]` | Socket.IO creation, JWT handshake check, membership lookup, server-made org room, Redis adapter, publish/close helpers | Server rules come before client connection |
+| 2 | `app.js`/`index.js` `[ADAPTED]` | Attach socket to real HTTP server; initialize adapter; close on shutdown | Makes socket server live |
+| 3 | route post-commit publishes `[NEW]` | Add job and movement event payloads after successful writes | There are now events to receive |
+| 4 | `socket-client.js` `[NEW]` | Connect/disconnect/reconnect using current access token | Client transport follows server contract |
+| 5 | `use-realtime.js` `[NEW]` | Patch TanStack cache; expose connection state | UI needs useful effects, not raw socket calls |
+| 6 | `AppShell.jsx` `[ADAPTED]` | Start one authenticated socket; show polling banner | Lifecycle must have one owner |
+| 7 | two-instance tests `[NEW]` | Connect to A, write to B, assert delivery and org isolation | Single-instance test is not enough |
+
+### Stop check
+
+- [ ] Bad JWT cannot connect.
+- [ ] Client cannot choose an arbitrary room.
+- [ ] Org A never receives Org B event.
+- [ ] Two-instance fan-out works.
+- [ ] Disconnect turns on 15-second polling; reconnect reconciles missed state.
+
+### What exists now
+
+Users see fast live changes, but PostgreSQL and polling remain the correctness path.
+
+---
+
+## B16 — Add proof images and invitations
+
+### Simple goal
+
+Let an assigned agent upload a small proof image directly to storage, and let an admin invite someone who has no account.
+
+### Files highlighted for this component
+
+```text
+shared/invitation-schema.js                            [NEW]
+server/
+├── prisma/schema.prisma                               [ADAPTED]
+└── src/
+    ├── lib/files/signed-url.js                        [NEW]
+    ├── routes/
+    │   ├── uploads.js                                 [NEW]
+    │   └── organizations.js                           [ADAPTED]
+    └── services/invitation-service.js                 [NEW]
+```
+
+### Create in this order
+
+| Order | File/part | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | JobAttachment + Invitation models/migration `[NEW]` | File metadata/checks; hashed invite token/expiry/single use | Both features need durable records |
+| 2 | `signed-url.js` `[NEW]` | Signed PUT/GET helpers, five-minute expiry, allowed MIME/size conditions | Route should not know storage SDK details |
+| 3 | `uploads.js` `[NEW]` | Current-assignee check, count<3, ≤5 MiB, allowed type, issue URL/read URL | Storage helper is ready |
+| 4 | completion-service attachment work `[NEW]` | Insert authorized attachment metadata in the job completion transaction | Links proof to durable completion |
+| 5 | invitation schema `[NEW]` | Follow the shared-schema factory pattern; define issue/accept/list/revoke inputs | Invitation service needs stable input |
+| 6 | `invitation-service.js` `[NEW]` | Random token, store hash, accept transaction, expiry/replay checks | Core invite rules |
+| 7 | `organizations.js` `[ADAPTED]` | Mount invitation endpoints | Service exists now |
+| 8 | file/invite tests `[NEW]` | Wrong agent/org, size/type, missing upload gap, expired/replayed invite | Proves safety and documented gap |
+
+### Stop check
+
+- [ ] Image bytes never pass through Express.
+- [ ] GCS itself rejects bad type/size conditions.
+- [ ] Another agent/org cannot get signed access.
+- [ ] Expired invite returns 410; used invite returns 409.
+- [ ] New user + membership are created in one transaction.
+
+### What exists now
+
+The product can onboard people and attach physical proof without loading large files into Node.
+
+---
+
+## B17 — Build the reusable React foundation
+
+### Simple goal
+
+Create one safe path for every browser request and restore the logged-in session.
+
+### Files highlighted for this component
+
+```text
+client/
+├── package.json                                      [ADAPTED]
+├── tailwind.config.js                                [NEW]
+└── src/
+    ├── main.jsx                                      [REUSED]
+    ├── query-client.js                               [REUSED]
+    ├── lib/api-client.js                             [REUSED]
+    ├── auth/                                         [REUSED]
+    ├── components/
+    │   ├── AppShell.jsx                              [ADAPTED]
+    │   ├── ProtectedRoute.jsx                        [REUSED]
+    │   ├── AsyncState.jsx                            [REUSED]
+    │   └── ToastProvider.jsx                         [REUSED]
+    ├── pages/
+    │   ├── LoginPage.jsx                             [REUSED]
+    │   └── RegisterPage.jsx                          [REUSED]
+    ├── mocks/
+    │   ├── setup.js                                  [REUSED]
+    │   └── handlers.js                               [ADAPTED]
+    └── test/                                         [REUSED]
+```
+
+### Copy or create in this order
+
+| Order | File/group | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `client/package.json` `[ADAPTED]` | Add React Router, Query, Zod, Socket.IO client, Leaflet, and Tailwind dependencies | Imports must resolve |
+| 2 | `tailwind.config.js` `[NEW]` | DispatchGrid content paths and theme tokens | Styling setup must exist before domain pages |
+| 3 | `api-client.js` `[REUSED]` | In-memory token, auth header, one refresh/replay, error parsing, stable idempotency key | Every hook depends on this one network path |
+| 4 | `query-client.js` `[REUSED]` | Retry/staleness defaults | Auth/pages need Query provider |
+| 5 | auth context `[REUSED]` | Session states and `/auth/me` restoration | ProtectedRoute depends on auth |
+| 6 | `ProtectedRoute`, `AsyncState`, toast `[REUSED]` | Common UI behavior | Pages should not duplicate it |
+| 7 | Login/Register `[REUSED]` | Forms through API client | First end-to-end UI |
+| 8 | `AppShell.jsx` `[ADAPTED]` | Navigation and placeholder for socket lifecycle | Protected pages need a shell |
+| 9 | `mocks/setup.js` and test helpers `[REUSED]` | Copy LedgerLine's MSW/test setup unchanged | Test infrastructure stays known-good |
+| 10 | `mocks/handlers.js` `[ADAPTED]` | Replace LedgerLine resource handlers with DispatchGrid API responses | Enables isolated DispatchGrid page tests |
+
+### Stop check
+
+- [ ] Only `api-client.js` calls `fetch`.
+- [ ] Access token never goes to localStorage.
+- [ ] One 401 causes one refresh and one replay.
+- [ ] Protected page redirects when logged out.
+- [ ] Login/Register work in browser and tests.
+
+### What exists now
+
+The browser has safe plumbing. Job screens come next.
+
+---
+
+## B18 — Build the product screens in demo order
+
+### Simple goal
+
+Make the backend's rules visible in a browser without hiding conflicts or failures.
+
+### Files highlighted for this component
+
+```text
+client/src/
+├── components/
+│   ├── JobCard.jsx                                   [NEW]
+│   ├── AssignDialog.jsx                              [NEW]
+│   ├── JobTimeline.jsx                               [NEW]
+│   └── JobMap.jsx                                    [NEW]
+├── hooks/
+│   ├── use-jobs.js                                   [NEW]
+│   ├── use-suggestions.js                            [NEW]
+│   └── use-realtime.js                               [NEW]
+└── pages/
+    ├── JobsBoardPage.jsx                             [NEW]
+    ├── JobDetailPage.jsx                             [NEW]
+    ├── AgentJobsPage.jsx                             [NEW]
+    ├── AgentMapPage.jsx                              [NEW]
+    ├── MembersPage.jsx                               [NEW]
+    ├── SLAPoliciesPage.jsx                           [NEW]
+    └── ReportsPage.jsx                               [NEW] [OPTIONAL: CUT FIRST]
+```
+
+### Create in this order
+
+| Order | File/group | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `use-jobs.js` `[NEW]` | List/detail queries and create/transition mutations | Pages should use hooks, not API calls |
+| 2 | `JobCard.jsx` `[NEW]` | Reference, title, status text/icon, priority, SLA, assignee | Board needs one repeated display unit |
+| 3 | `JobsBoardPage.jsx` `[NEW]` | Filters, AsyncState, create action, JobCard list | First useful dispatcher screen |
+| 4 | `JobTimeline.jsx` then `JobDetailPage.jsx` `[NEW]` | Current version, actions, durable event history | Assignment interaction needs detail data |
+| 5 | `use-suggestions.js` then `AssignDialog.jsx` `[NEW]` | Ranked numbers, optional rationale, assign current version, 409 refetch/toast | Builds the signature concurrency UX |
+| 6 | `AgentJobsPage.jsx` `[NEW]` | Mobile-first accept/decline/start/complete | Completes the human workflow |
+| 7 | `use-realtime.js` integration `[NEW]` | Patch Query cache; polling flag | Live status before map complexity |
+| 8 | `JobMap.jsx` and `AgentMapPage.jsx` `[NEW]` | Leaflet positions or table fallback | Tracking data already flows |
+| 9 | Members/SLA pages `[NEW]` | Admin workflows | Core demo already works |
+| 10 | Reports `[NEW]` `[OPTIONAL: CUT FIRST]` | Date range and aggregate display | Least important dependency leaf |
+
+### Every page must show these states
+
+```text
+loading · empty · error · version conflict · rate limited
+forbidden mismatch · socket down/polling
+```
+
+### Stop check
+
+- [ ] Two browsers complete create→assign→accept→start→complete.
+- [ ] 409 refreshes data and explains the conflict in a toast.
+- [ ] Socket event patches cache without a REST request per event.
+- [ ] Disconnect shows polling banner and data continues updating.
+- [ ] Agent page works comfortably at phone width.
+
+### What exists now
+
+DispatchGrid is a usable product, not only a backend demonstration.
+
+---
+
+## B19 — Make it observable, secure, and deployable
+
+### Simple goal
+
+Make failures visible, prove security claims, deploy API and worker safely, and practice rollback.
+
+### Files highlighted for this component
+
+```text
+dispatchgrid/
+├── Dockerfile                                        [NEW]
+├── README.md                                         [NEW]
+├── .github/workflows/ci.yml                          [ADAPTED]
+└── server/src/
+    ├── app.js                                        [ADAPTED]
+    ├── index.js                                      [ADAPTED]
+    ├── worker.js                                     [NEW]
+    └── lib/log-redact.js                             [REUSED]
+```
+
+### Create or change in this order
+
+| Order | File/area | What goes inside | Why this order |
+|---|---|---|---|
+| 1 | `log-redact.js` `[REUSED]` | Keep LedgerLine's safe redaction; use the same log fields in API and worker | Safe logs are the base of visibility |
+| 2 | metrics/readiness code in `app.js` `[ADAPTED]` | Add `/metrics` and `/readyz`; keep `/healthz` cheap | You need visibility before deploying |
+| 3 | security verification tests `[NEW]` | Unknown fields, org 404, object ownership, socket isolation, RLS role, signed URL, raw SQL search | Prove claims locally before cloud |
+| 4 | shutdown code in `index.js` `[ADAPTED]` | API drains HTTP/socket and closes data clients | API deploys must not cut requests |
+| 5 | shutdown code in `worker.js` `[NEW]` | Stop pulling, finish current job, then close clients | Worker deploys must not abandon work |
+| 6 | `Dockerfile` `[NEW]` | One image; selectable API or worker entrypoint | Cloud services need an image |
+| 7 | `ci.yml` `[ADAPTED]` | Lint→unit→integration→race/property→build/audit→staging→approval→production | Automate cheapest checks first |
+| 8 | cloud service configuration `[NEW]` | API min0/max10; worker min1; Cloud SQL; Upstash; GCS; Secret Manager | App is tested and packaged first |
+| 9 | alerts `[NEW]` | 5xx, latency, growing queue, conflicts, pool saturation, worker inactive | Production problems must be actionable |
+| 10 | `README.md` `[NEW]` | Demo, architecture, three best files, setup, tests, deliberate exclusions | Write from the verified system |
+| 11 | rollback/demo evidence `[NEW]` | Run rollback; record video/screenshots | A procedure is real only after practice |
+
+### Stop check
+
+- [ ] Every database constraint has a test that makes it fire.
+- [ ] Race test runs 20 times in CI.
+- [ ] Worker-down alert fires.
+- [ ] `git push` reaches staging, then production after one manual approval.
+- [ ] Previous revision rollback has been executed.
+- [ ] Demo video and dashboard images are saved before the trial ends.
+
+### What exists now
+
+The system is complete: correct, visible when it fails, safe to deploy, and ready to explain.
 
 ---
 
@@ -664,7 +1921,7 @@ With `breachMinutesAfter = 0`, the examples that breach exactly at `dueAt` remai
 - `[REUSED pattern]` route/service/serializer triple
 - `[ADAPTED] shared/tenant-schema.js`
 - `[NEW] shared/job-schema.js`
-- `[ADAPTED/NEW] server/src/serializers/*`
+- `[NEW] server/src/serializers/*` — follow LedgerLine's serializer pattern, but create DispatchGrid response shapes
 
 **Build slices**
 
@@ -1117,7 +2374,7 @@ Choose and document one consistent lock order for operations touching both job a
 - `[NEW] server/src/worker/handlers/notifications.js`
 - `[NEW] server/src/lib/notifications/email-stub.js`
 - `[NEW] server/src/routes/admin-dead-letter.js` or equivalent mounted admin route
-- `[NEW/RECOMMENDATION] reconciliation handler if DG-2 selected it`
+- `[NEW]` `[RECOMMENDATION]` reconciliation handler if DG-2 selected it
 
 **Build slices**
 
@@ -1562,13 +2819,13 @@ Use a bounded system prompt: describe only supplied numbers, invent nothing, exp
 | Model | Status | Critical rule |
 |---|---|---|
 | Organization | `[ADAPTED]` | Default concurrent job cap; shared-schema owner |
-| User | `[REUSED/ADAPTED naming relations]` | Global unique case-insensitive email |
+| User | `[ADAPTED]` | Keep LedgerLine fields and change tenant-related relation names; global unique case-insensitive email |
 | Membership | `[ADAPTED]` | Unique org/user; role, availability, cap override |
-| Role / Permission / RolePermission | `[REUSED/ADAPTED seed]` | Permission-code authorization |
+| Role / Permission / RolePermission | `[ADAPTED]` | Keep LedgerLine model shape and seed DispatchGrid permission codes |
 | RefreshToken | `[REUSED]` | Hashed opaque token, rotation family |
 | AuditLog | `[REUSED]` | Append-only broad mutation trail, best effort after response |
 | IdempotencyKey | `[REUSED]` | Unique operation key + fingerprint/stored response |
-| Counter | `[REUSED/ADAPTED]` | Locked in same transaction; RLS on raw SQL path |
+| Counter | `[ADAPTED]` | Keep LedgerLine counter shape, use Organization naming, lock in same transaction, and protect raw SQL with RLS |
 
 ### 8.2 DispatchGrid-specific models
 
@@ -1845,7 +3102,7 @@ dispatchgrid/
 │       │   ├── job-service.js                          [NEW]
 │       │   ├── assignment-service.js                   [NEW]
 │       │   └── invitation-service.js                   [NEW]
-│       ├── serializers/                                [ADAPTED/NEW]
+│       ├── serializers/                                [NEW]
 │       ├── worker/handlers/{job-events,sla-sweep,notifications}.js [NEW]
 │       └── test/
 │           ├── helpers.js                              [REUSED]

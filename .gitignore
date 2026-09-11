@@ -18,10 +18,7 @@ server/.env.local
 
 # Prisma generated client and local tooling
 server/src/generated/prisma/
-server/.agents/
-server/.claude/
-server/.windsurf/
-server/skills-lock.json
+
 
 # Logs and runtime files
 *.log
@@ -42,3 +39,6 @@ Desktop.ini
 # Local Docker overrides
 docker-compose.override.yml
 compose.override.yml
+
+Dispatch_plan.md
+docs
