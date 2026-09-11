@@ -16,6 +16,8 @@ export const JOB_STATUSES = Object.freeze([
 
 export const JOB_PRIORITIES = Object.freeze(['LOW', 'NORMAL', 'HIGH', 'URGENT'])
 
+export const JOB_SLA_STATES = Object.freeze(['OK', 'WARNING', 'BREACHED'])
+
 export function jobSchemas(z) {
   const createJobSchema = z
     .object({
@@ -42,6 +44,7 @@ export function jobSchemas(z) {
         .optional(),
       priority: z.enum(JOB_PRIORITIES).optional(),
       assigneeId: z.string().uuid().optional(),
+      slaState: z.enum(JOB_SLA_STATES).optional(),
       dueBefore: z.string().datetime().optional(),
       page: z.coerce.number().int().min(1).default(1),
       pageSize: z.coerce.number().int().min(1).max(100).default(20),
