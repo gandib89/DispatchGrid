@@ -118,35 +118,70 @@ describe('handler entry validation', () => {
 })
 
 describe('job-event handler', () => {
+  function recordingEnqueue() {
+    const enqueued = []
+    return {
+      enqueued,
+      enqueueNotification: async (payload) => {
+        enqueued.push(payload)
+        return { id: `fake-${enqueued.length}` }
+      },
+    }
+  }
+
   it('consumes an existing job and logs the originating requestId', async () => {
     const { organization, job } = await createJobRow()
     const log = recordingLogger()
+    const fake = recordingEnqueue()
     const payload = jobEventPayload({
       jobId: job.id,
       organizationId: organization.id,
       requestId: 'req-correlation-1',
     })
 
-    const result = await handleJobEvent(payload, { prisma: ownerDatabase, log })
+    const result = await handleJobEvent(payload, { prisma: ownerDatabase, log, ...fake })
 
     expect(result).toMatchObject({ status: 'consumed', jobId: job.id, requestId: 'req-correlation-1' })
     expect(log.entries.some((entry) => entry.childContext?.requestId === 'req-correlation-1')).toBe(true)
   })
 
+  it('routes a consumed event to one delivery for the job creator while unassigned', async () => {
+    const { organization, job } = await createJobRow()
+    const fake = recordingEnqueue()
+
+    const result = await handleJobEvent(
+      jobEventPayload({ jobId: job.id, organizationId: organization.id }),
+      { prisma: ownerDatabase, log: recordingLogger(), ...fake },
+    )
+
+    expect(result).toMatchObject({ status: 'consumed', notificationType: 'JOB_UPDATED' })
+    expect(fake.enqueued).toHaveLength(1)
+    expect(fake.enqueued[0]).toMatchObject({
+      type: 'notification',
+      jobId: job.id,
+      organizationId: organization.id,
+      notificationType: 'JOB_UPDATED',
+      recipientId: job.createdById,
+    })
+  })
+
   it('tolerates zero deliveries: a missing job is a safe no-op, not a retry', async () => {
     const log = recordingLogger()
-    const result = await handleJobEvent(jobEventPayload(), { prisma: ownerDatabase, log })
+    const fake = recordingEnqueue()
+    const result = await handleJobEvent(jobEventPayload(), { prisma: ownerDatabase, log, ...fake })
 
     expect(result).toMatchObject({ status: 'missing-job-noop' })
+    expect(fake.enqueued).toHaveLength(0)
   })
 
   it('tolerates many deliveries: repeat consumption returns the same outcome', async () => {
     const { organization, job } = await createJobRow()
     const log = recordingLogger()
+    const fake = recordingEnqueue()
     const payload = jobEventPayload({ jobId: job.id, organizationId: organization.id })
 
-    const first = await handleJobEvent(payload, { prisma: ownerDatabase, log })
-    const second = await handleJobEvent(payload, { prisma: ownerDatabase, log })
+    const first = await handleJobEvent(payload, { prisma: ownerDatabase, log, ...fake })
+    const second = await handleJobEvent(payload, { prisma: ownerDatabase, log, ...fake })
 
     expect(second).toEqual(first)
   })
@@ -406,7 +441,11 @@ describe('handler router', () => {
     const { organization, job } = await createJobRow()
     const result = await routeQueueJob(
       { data: jobEventPayload({ jobId: job.id, organizationId: organization.id }) },
-      { prisma: ownerDatabase, log: recordingLogger() },
+      {
+        prisma: ownerDatabase,
+        log: recordingLogger(),
+        enqueueNotification: async () => ({ id: 'fake-router-enqueue' }),
+      },
     )
 
     expect(result).toMatchObject({ status: 'consumed', jobId: job.id })

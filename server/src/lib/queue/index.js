@@ -1,11 +1,11 @@
 import { Queue, UnrecoverableError, createNodeRedisClient } from 'bullmq'
 import { z } from 'zod'
-import { SLA_THRESHOLDS, queueSchemas } from '../../../../shared/queue-schema.js'
+import { NOTIFICATION_TYPES, SLA_THRESHOLDS, queueSchemas } from '../../../../shared/queue-schema.js'
 import { logger } from '../logger.js'
 import { createRedisClient } from '../redis.js'
 import { recordDeadLettered, recordEnqueueFailure } from './metrics.js'
 
-export { SLA_THRESHOLDS }
+export { NOTIFICATION_TYPES, SLA_THRESHOLDS }
 
 export { queueMetrics, recordEnqueueFailure, recordDeadLettered, resetQueueMetrics } from './metrics.js'
 
@@ -27,6 +27,7 @@ const schemas = queueSchemas(z)
 export const QUEUE_NAMES = Object.freeze({
   jobEvents: 'job-events',
   sla: 'sla',
+  notifications: 'notifications',
   deadLetter: 'dead-letter',
 })
 
@@ -35,6 +36,15 @@ export const QUEUE_NAMES = Object.freeze({
 export const queueDefaults = Object.freeze({
   attempts: 5,
   backoff: Object.freeze({ type: 'exponential', delay: 1000 }),
+  removeOnComplete: 1000,
+})
+
+// Retryable delivery (B13): five attempts with 2s → 32s exponential backoff
+// (BullMQ multiplies the base by 2^attempt: 2, 4, 8, 16, 32). The base delay
+// is the first tuning knob if provider behavior changes.
+export const notificationDefaults = Object.freeze({
+  attempts: 5,
+  backoff: Object.freeze({ type: 'exponential', delay: 2000 }),
   removeOnComplete: 1000,
 })
 
@@ -53,7 +63,8 @@ export function getQueue(name) {
     throw new Error(`Unknown queue: ${name}`)
   }
   if (!queues.has(name)) {
-    queues.set(name, new Queue(name, { connection: getConnection(), defaultJobOptions: queueDefaults }))
+    const defaultJobOptions = name === QUEUE_NAMES.notifications ? notificationDefaults : queueDefaults
+    queues.set(name, new Queue(name, { connection: getConnection(), defaultJobOptions }))
   }
   return queues.get(name)
 }
@@ -119,6 +130,46 @@ export async function scheduleSlaCheck(payload, options = {}) {
 // threshold for the same job is always the same delayed job.
 export function slaCheckJobId(jobId, threshold) {
   return `sla-check:${jobId}:${threshold}`
+}
+
+// Deterministic BullMQ identity per delivery (B13): the same type for the
+// same job and recipient is always the same queued delivery, so re-enqueueing
+// committed work collapses onto the pending delivery instead of doubling it.
+// BullMQ custom ids may contain ':' only with exactly three segments, so the
+// type and recipient share the third segment behind a '#' (neither value
+// contains ':' or '#').
+export function notificationJobId(jobId, notificationType, recipientId) {
+  return `notification:${jobId}:${notificationType}#${recipientId}`
+}
+
+// After-commit-only: enqueue a validated delivery request. Re-adds collapse
+// onto a still-pending delivery under the deterministic identity; a settled
+// entry is dropped and re-armed fresh. Callers may override attempts/backoff
+// (tests use small values so the five-attempt drill stays fast).
+export async function enqueueNotification(payload, options = {}) {
+  const data = schemas.notificationPayloadSchema.parse(payload)
+  const queue = getQueue(QUEUE_NAMES.notifications)
+  const jobId = options.jobId ?? notificationJobId(data.jobId, data.notificationType, data.recipientId)
+  const addOptions = { ...options }
+  delete addOptions.jobId
+  const existing = await queue.getJob(jobId).catch(() => undefined)
+  if (existing) {
+    const state = await existing.getState().catch(() => undefined)
+    if (state === 'delayed' || state === 'waiting' || state === 'active' || state === 'prioritized') {
+      logger.info(
+        { queue: QUEUE_NAMES.notifications, jobId, requestId: data.requestId },
+        'Notification already queued; collapsing onto the pending delivery',
+      )
+      return existing
+    }
+    await existing.remove().catch(() => {})
+  }
+  const job = await queue.add(data.type, data, { ...addOptions, jobId })
+  logger.info(
+    { queue: QUEUE_NAMES.notifications, jobId: job.id, requestId: data.requestId },
+    existing ? 'Re-armed notification over a settled delivery' : 'Enqueued notification',
+  )
+  return job
 }
 
 // DG-4 fire-time math (decisions.md): warningAt = dueAt − warningMinutesBefore,
@@ -242,6 +293,25 @@ export async function sendToDeadLetter(sourceQueueName, job, error) {
     'Moved exhausted job to dead-letter path',
   )
   return stored
+}
+
+// Manual/CLI replay (B13): re-enqueue a dead-letter envelope's payload on
+// its source queue. Returns the new job, or null when the envelope is
+// missing or refuses replay (unknown source, dead-letter source, no data).
+export async function replayDeadLetter(deadLetterJobId) {
+  const stored = await getQueue(QUEUE_NAMES.deadLetter).getJob(deadLetterJobId)
+  const { sourceQueue, data, name } = stored?.data ?? {}
+  if (
+    !stored ||
+    !sourceQueue ||
+    !Object.values(QUEUE_NAMES).includes(sourceQueue) ||
+    sourceQueue === QUEUE_NAMES.deadLetter ||
+    !data ||
+    typeof data !== 'object'
+  ) {
+    return null
+  }
+  return getQueue(sourceQueue).add(name ?? 'replay', data)
 }
 
 // Called from the worker's failed listener: forward only when the job will

@@ -131,6 +131,32 @@ from the current earliest policy. Status: recorded and pinned by a
 multi-policy test; replace with a real association when a second selection
 signal is needed. Do not build policy association on this ticket.
 
+## B13 — notification pipeline (Spec 6)
+
+**Verdict:** durable delivery records plus async send, strictly separated from
+business truth. Delivery failure retries; exhaustion is inspectable; the
+enqueue gap reconciles. Status: implemented; tuning knobs noted below.
+
+- **Retry contract:** five attempts with exponential backoff 2s → 32s
+  (`server/src/lib/queue/index.js:notificationDefaults`, BullMQ multiplies the
+  2s base by 2^attempt). The base delay is the first tuning knob if provider
+  behavior changes.
+- **Ordering:** check → send → record. A prior SENT row turns redelivery into
+  a no-op; every attempt is counted with `lastAttemptAt`. Consumer-side
+  exactly-once rests on `UNIQUE (jobId, type, recipientId)`.
+- **Scope promise:** ASSIGNED jobs promise JOB_ASSIGNED, BREACH escalations
+  promise SLA_BREACH. WARNING escalations intentionally promise no delivery
+  (breach-only fan-out, preserved from B12); reconciliation covers exactly the
+  promised set, nothing more.
+- **Dead-letter:** exhausted work lands on the B11 queue path with request
+  correlation; `GET /api/v1/admin/dead-letter` (read-only, `org.manage`,
+  tenant-filtered) inspects it and `POST …/:id/replay` manually re-enqueues it.
+- **Known window (documented, not hidden):** if the provider accepts the
+  message and the process dies before recording success, a duplicate can
+  escape externally. Provider idempotency keys or a transactional outbox would
+  close it; the database-uniqueness consumer guarantee stands and is tested as
+  intended. Proven by `server/src/test/worker/notifications.test.js`.
+
 ## B11→B12 queue upgrade — legacy sla-check timers drain as no-ops
 
 **Verdict:** B11 delayed `sla-check` timers carry no threshold promise and fail

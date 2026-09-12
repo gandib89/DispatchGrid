@@ -99,8 +99,13 @@ describe('at-least-once delivery', () => {
 
     // First delivery never acknowledges. Force-closing the worker leaves its
     // lock behind; a new worker must recover the stalled job after restart.
+    // Only job-events deliveries count: consuming one now enqueues follow-on
+    // notification work (B13) that this same test worker also consumes.
     let attempts = 0
     const processor = async (bullJob) => {
+      if (bullJob.queueName !== QUEUE_NAMES.jobEvents) {
+        return routeQueueJob(bullJob, { prisma: ownerDatabase })
+      }
       attempts += 1
       if (attempts === 1) return new Promise(() => {})
       return routeQueueJob(bullJob, { prisma: ownerDatabase })
