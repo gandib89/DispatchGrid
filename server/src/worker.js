@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url'
 import { Worker } from 'bullmq'
 import { prisma } from './db/client.js'
 import { logger } from './lib/logger.js'
+import { integrationAdapters } from './lib/integration-adapters.js'
 import {
   QUEUE_NAMES,
   closeQueues,
@@ -21,6 +22,18 @@ import { reconcileJobEvents } from './worker/reconcile.js'
 // raw duplicate never connects, so an unwrapped client hangs waitUntilReady.
 let runtime = null
 
+// Production handler deps: breach side effects resolve through the named
+// integration seam (late-bound so tests can stub the adapters). The default
+// processor below uses these — never a bare { prisma, log }.
+export function productionDeps(database = prisma) {
+  return {
+    prisma: database,
+    log: logger,
+    publishEscalationEvent: (...args) => integrationAdapters.publishEscalationEvent(...args),
+    enqueueEscalationNotification: (...args) => integrationAdapters.enqueueEscalationNotification(...args),
+  }
+}
+
 export async function startWorker(options = {}) {
   if (runtime) {
     throw new Error('Worker already started')
@@ -28,7 +41,7 @@ export async function startWorker(options = {}) {
 
   const {
     prisma: database = prisma,
-    processor = (job) => routeQueueJob(job, { prisma: database, log: logger }),
+    processor = (job) => routeQueueJob(job, productionDeps(database)),
     workerOptions = {},
     reconciliation = true,
     reconciliationIntervalMs = 60_000,

@@ -99,3 +99,43 @@ re-enqueuing any missing current version through the T1 producer. Terminal
 transitions qualify and are safe because consumers reread PostgreSQL. The
 threshold-based SLA variant (active jobs past threshold without an `Escalation`) lands with the
 `Escalation` table in B12, as does the `sla-check` threshold vocabulary.
+
+## DG-4 — SLA breach timing formula (resolved, B12-T1)
+
+**Verdict:** warning and breach evaluation times derive from the job deadline
+as `warningAt = dueAt − warningMinutesBefore` and
+`breachAt = dueAt + breachMinutesAfter`. Offset zero is valid on both sides:
+a zero `warningMinutesBefore` warns exactly at `dueAt`, and a zero
+`breachMinutesAfter` breaches exactly at `dueAt` (the nonnegative-threshold
+CHECK permits zero; proven by `server/src/test/db/sla-constraints.test.js`).
+Status: recorded; scheduling and handler enforcement land in B12-T2/T3.
+
+## A-6 — no rescheduling on policy edit (resolved, B12-T1)
+
+**Verdict:** editing an SLA policy applies only to newly assigned jobs. Already
+enqueued delayed warning/breach work keeps the thresholds promised at
+assignment time and is never rescheduled. Rationale: an assignment is a
+promise made with specific thresholds; silently shifting existing timers would
+rewrite that promise. Handler-side safety comes from re-reading tenant-scoped
+job and policy data before acting, so stale timers against terminal jobs are
+safe no-ops. Status: recorded; assignment-time snapshotting lands in B12-T2.
+
+## SLA policy selection — earliest-created wins (resolved, B12 review)
+
+**Verdict:** when an organization holds several policies, assignment arms the
+job's clock from the earliest-created policy (`createdAt`, then `id` as the
+tiebreak) until a job→policy association exists. This is an explicit stopgap,
+not a ranking: no priority, specificity, or job-type matching is implied.
+Re-assign counts as a new assignment — it drops the stale pair and re-arms
+from the current earliest policy. Status: recorded and pinned by a
+multi-policy test; replace with a real association when a second selection
+signal is needed. Do not build policy association on this ticket.
+
+## B11→B12 queue upgrade — legacy sla-check timers drain as no-ops
+
+**Verdict:** B11 delayed `sla-check` timers carry no threshold promise and fail
+B12 strict parsing. Both the router and the handler recognize that shape and
+acknowledge it (`sla-legacy-noop` — no writes, no fan-out) instead of
+poisoning it onto the dead-letter path. Upgrade path: deploy freely — stale
+B11 timers drain harmlessly while every new assignment arms threshold
+payloads. No Redis drain or obliteration required.

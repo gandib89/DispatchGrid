@@ -1,9 +1,11 @@
 import { Queue, UnrecoverableError, createNodeRedisClient } from 'bullmq'
 import { z } from 'zod'
-import { queueSchemas } from '../../../../shared/queue-schema.js'
+import { SLA_THRESHOLDS, queueSchemas } from '../../../../shared/queue-schema.js'
 import { logger } from '../logger.js'
 import { createRedisClient } from '../redis.js'
-import { recordDeadLettered } from './metrics.js'
+import { recordDeadLettered, recordEnqueueFailure } from './metrics.js'
+
+export { SLA_THRESHOLDS }
 
 export { queueMetrics, recordEnqueueFailure, recordDeadLettered, resetQueueMetrics } from './metrics.js'
 
@@ -73,17 +75,97 @@ export async function enqueueJobEvent(payload, options = {}) {
   return job
 }
 
-// After-commit-only: schedule a delayed generic SLA check (delay via options).
-// Threshold vocabulary lands in B12 with the Escalation table.
+// After-commit-only: schedule a delayed threshold evaluation (DG-4).
+// The BullMQ identity is deterministic per job and threshold, so re-adding
+// the same threshold collapses onto the one pending evaluation instead of
+// doubling it. Delay defaults to the DG-4 fire time minus now; pass an
+// explicit delay only to override the formula (tests).
 export async function scheduleSlaCheck(payload, options = {}) {
   const data = schemas.slaCheckPayloadSchema.parse(payload)
   const queue = getQueue(QUEUE_NAMES.sla)
-  const job = await queue.add(data.type, data, options)
+  const jobId = options.jobId ?? slaCheckJobId(data.jobId, data.threshold)
+  const delay = options.delay ?? slaDelayMs({ ...data, now: options.now })
+  const addOptions = { ...options }
+  delete addOptions.jobId
+  delete addOptions.delay
+  delete addOptions.now
+  // Deterministic IDs collapse re-adds onto the stored evaluation — but only
+  // a still-pending one. BullMQ's add never throws for a duplicate ID; it
+  // hands back the stored job whatever its state, so a settled entry
+  // (completed/failed) would report "armed" with nothing pending. Check first:
+  // collapse onto delayed/waiting/active work, otherwise drop the settled
+  // entry and arm fresh under the same identity.
+  const existing = await queue.getJob(jobId).catch(() => undefined)
+  if (existing) {
+    const state = await existing.getState().catch(() => undefined)
+    if (state === 'delayed' || state === 'waiting' || state === 'active') {
+      logger.info(
+        { queue: QUEUE_NAMES.sla, jobId, requestId: data.requestId, threshold: data.threshold },
+        'SLA check already scheduled; collapsing onto the pending evaluation',
+      )
+      return existing
+    }
+    await existing.remove().catch(() => {})
+  }
+  const job = await queue.add(data.type, data, { ...addOptions, delay, jobId })
   logger.info(
-    { queue: QUEUE_NAMES.sla, jobId: job.id, requestId: data.requestId },
-    'Scheduled SLA check',
+    { queue: QUEUE_NAMES.sla, jobId: job.id, requestId: data.requestId, threshold: data.threshold },
+    existing ? 'Re-armed SLA check over a settled evaluation' : 'Scheduled SLA check',
   )
   return job
+}
+
+// Deterministic BullMQ identity per job and threshold (B12-T3): the same
+// threshold for the same job is always the same delayed job.
+export function slaCheckJobId(jobId, threshold) {
+  return `sla-check:${jobId}:${threshold}`
+}
+
+// DG-4 fire-time math (decisions.md): warningAt = dueAt − warningMinutesBefore,
+// breachAt = dueAt + breachMinutesAfter, so offset zero fires exactly at
+// dueAt. Returns the BullMQ delay in ms; an already-past fire time schedules
+// immediately (delay 0) instead of a negative delay.
+export function slaDelayMs({
+  dueAt,
+  threshold,
+  warningMinutesBefore,
+  breachMinutesAfter,
+  now = Date.now(),
+}) {
+  const dueMs = new Date(dueAt).getTime()
+  const fireAtMs =
+    threshold === 'WARNING' ? dueMs - warningMinutesBefore * 60_000 : dueMs + breachMinutesAfter * 60_000
+  return Math.max(0, fireAtMs - new Date(now).getTime())
+}
+
+// Disarm one pending delayed evaluation. Never throws: a missing job returns
+// false, and any other failure only warns and meters — the handler re-reads
+// PostgreSQL state before acting, so a surviving timer is harmless.
+export async function removePendingSlaEvaluation(jobId, threshold) {
+  try {
+    const job = await getQueue(QUEUE_NAMES.sla).getJob(slaCheckJobId(jobId, threshold))
+    if (!job) return false
+    await job.remove()
+    logger.info(
+      { queue: QUEUE_NAMES.sla, jobId: job.id, threshold },
+      'Removed pending SLA evaluation',
+    )
+    return true
+  } catch (error) {
+    recordEnqueueFailure()
+    logger.warn({ queue: QUEUE_NAMES.sla, jobId, threshold, error }, 'Removing pending SLA evaluation failed')
+    return false
+  }
+}
+
+// Disarm every pending delayed evaluation for a job (terminal transitions).
+// Never throws; see removePendingSlaEvaluation.
+export async function removePendingSlaEvaluations(jobId) {
+  const removed = []
+  for (const threshold of SLA_THRESHOLDS) {
+    removed.push(await removePendingSlaEvaluation(jobId, threshold))
+  }
+  return removed
 }
 
 // Test/worker-shutdown helper: closes queues, then the shared connection.

@@ -30,6 +30,11 @@ function slaPayload(overrides = {}) {
     jobId: crypto.randomUUID(),
     organizationId: crypto.randomUUID(),
     requestId: crypto.randomUUID(),
+    threshold: 'WARNING',
+    slaPolicyId: crypto.randomUUID(),
+    warningMinutesBefore: 30,
+    breachMinutesAfter: 15,
+    dueAt: new Date(Date.now() + 3_600_000).toISOString(),
     ...overrides,
   }
 }
@@ -60,7 +65,7 @@ describe('queue payload contracts', () => {
       { ...jobEventPayload(), organizationId: undefined },
       { ...jobEventPayload(), requestId: undefined },
       { ...jobEventPayload(), type: undefined },
-      { ...slaPayload(), thresholdType: 'someday' },
+      { ...slaPayload(), threshold: 'someday' },
     ]) {
       expect(() => schemas.queuePayloadSchema.parse(payload)).toThrow()
     }

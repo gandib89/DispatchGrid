@@ -34,6 +34,11 @@ enum SlaState {
   BREACHED
 }
 
+enum EscalationThreshold {
+  WARNING
+  BREACH
+}
+
 enum AssignmentState {
   OFFERED
   ACCEPTED
@@ -58,6 +63,8 @@ model Organization {
   jobs                    Job[]
   assignments             Assignment[]
   jobEvents               JobEvent[]
+  slaPolicies             SlaPolicy[]
+  escalations             Escalation[]
 
   @@index([createdAt])
 }
@@ -219,6 +226,7 @@ model Job {
   organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   assignments       Assignment[]
   events            JobEvent[]
+  escalations       Escalation[]
 
   @@unique([organizationId, reference])
   @@index([organizationId, status, priority, dueAt])
@@ -253,5 +261,32 @@ model JobEvent {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   job            Job          @relation(fields: [jobId], references: [id], onDelete: Restrict)
 
+  @@index([organizationId, jobId, createdAt])
+}
+
+model SlaPolicy {
+  id                   String       @id @default(uuid()) @db.Uuid
+  organizationId       String       @db.Uuid
+  name                 String       @db.VarChar(80)
+  warningMinutesBefore Int
+  breachMinutesAfter   Int
+  createdAt            DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime     @updatedAt @db.Timestamptz(6)
+  organization         Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, name])
+  @@index([organizationId, createdAt])
+}
+
+model Escalation {
+  id             String              @id @default(uuid()) @db.Uuid
+  organizationId String              @db.Uuid
+  jobId          String              @db.Uuid
+  threshold      EscalationThreshold
+  createdAt      DateTime            @default(now()) @db.Timestamptz(6)
+  organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  job            Job                 @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@unique([jobId, threshold])
   @@index([organizationId, jobId, createdAt])
 }

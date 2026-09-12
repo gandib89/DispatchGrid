@@ -13,7 +13,8 @@ import { acceptJob, assignJob, declineJob } from '../services/assignment-service
 import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
 import { serializeAssignment, serializeEvent, serializeJob } from '../serializers/job-serializer.js'
-import { afterJobCommit as runPostCommitHooks } from '../lib/integration-adapters.js'
+import { afterJobCommit as runPostCommitHooks, scheduleSlaAfterAssign } from '../lib/integration-adapters.js'
+import { removePendingSlaEvaluations } from '../lib/queue/index.js'
 import { recordEnqueueFailure } from '../lib/queue/metrics.js'
 
 // B10-T2/T3/T4 (built): transitions (PATCH, start/complete/cancel/fail),
@@ -75,17 +76,36 @@ export function clearBoardCache() {
 // committed business state stands and reconciliation (T4) repairs the gap.
 async function afterJobCommit(req, actor, job) {
   invalidateBoardCache(actor.organizationId)
+  const requestId = req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID()
   try {
     await runPostCommitHooks({
       jobId: job.id,
       jobVersion: job.version,
       organizationId: actor.organizationId,
       status: job.status,
-      requestId: req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID(),
+      requestId,
     })
   } catch (error) {
     recordEnqueueFailure()
     req.log?.warn?.({ error }, 'Post-commit integration hook failed')
+  }
+  // B12-T3: arm the clock on the transition that creates the promise (assign
+  // lands on ASSIGNED) and disarm it on every other transition. Anything past
+  // the promise — decline back to PENDING, accept/start progress, terminal
+  // moves — drops the stale pair: a surviving timer would escalate a job that
+  // no longer carries the assignment it was armed for. After commit only —
+  // this runs once the service promise has resolved, never inside the
+  // transaction. A throwing hook never fails the request: the committed
+  // business state stands and the failure is warned and metered.
+  try {
+    if (job.status === 'ASSIGNED') {
+      await scheduleSlaAfterAssign({ job, organizationId: actor.organizationId, requestId })
+    } else {
+      await removePendingSlaEvaluations(job.id)
+    }
+  } catch (error) {
+    recordEnqueueFailure()
+    req.log?.warn?.({ error }, 'Post-commit SLA hook failed')
   }
 }
 
