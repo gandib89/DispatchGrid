@@ -17,6 +17,7 @@ function jobEventPayload(overrides = {}) {
   return {
     type: 'job-event',
     jobId: crypto.randomUUID(),
+    jobVersion: 0,
     organizationId: crypto.randomUUID(),
     requestId: `req-${crypto.randomUUID()}`,
     ...overrides,

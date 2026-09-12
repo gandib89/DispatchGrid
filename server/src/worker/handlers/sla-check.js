@@ -13,7 +13,7 @@ export async function handleSlaCheck(payload, deps = {}) {
     schema: schemas.slaCheckPayloadSchema,
     unprocessablePrefix: 'Unprocessable sla-check payload',
     missingLog: 'sla-check for unknown job; acknowledging as no-op',
-    found: (job, data, log) => {
+    onJobFound: (job, data, log) => {
       log.info({ jobStatus: job.status }, 'SLA check observed')
       return { status: 'sla-check-noop', jobId: job.id, requestId: data.requestId }
     },

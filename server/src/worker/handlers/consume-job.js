@@ -3,8 +3,12 @@ import { logger } from '../../lib/logger.js'
 
 // Shared parse/child-log/scoped-findFirst/noop skeleton for job-scoped queue
 // consumers. Handlers pass only their literals (handler name, schema, messages,
-// found outcome); validation failures are unrecoverable so poison fails fast.
-export async function consumeJob(payload, deps = {}, { handler, schema, unprocessablePrefix, missingLog, found }) {
+// found-job outcome); validation failures are unrecoverable so poison fails fast.
+export async function consumeJob(
+  payload,
+  deps = {},
+  { handler, schema, unprocessablePrefix, missingLog, onJobFound },
+) {
   let data
   try {
     data = schema.parse(payload)
@@ -27,5 +31,5 @@ export async function consumeJob(payload, deps = {}, { handler, schema, unproces
     return { status: 'missing-job-noop', jobId: data.jobId, requestId: data.requestId }
   }
 
-  return found(job, data, log)
+  return onJobFound(job, data, log)
 }

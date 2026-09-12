@@ -78,6 +78,7 @@ async function afterJobCommit(req, actor, job) {
   try {
     await runPostCommitHooks({
       jobId: job.id,
+      jobVersion: job.version,
       organizationId: actor.organizationId,
       status: job.status,
       requestId: req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID(),

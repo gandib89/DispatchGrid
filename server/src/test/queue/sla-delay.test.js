@@ -52,7 +52,7 @@ describe('delayed sla-check seam', () => {
       requestId: `req-sla-${crypto.randomUUID()}`,
     }
 
-    await startWorker({ prisma: ownerDatabase })
+    await startWorker({ prisma: ownerDatabase, reconciliation: false })
     const raw = createClient({ url: env.REDIS_URL })
     const queueEvents = new QueueEvents(QUEUE_NAMES.sla, {
       connection: createNodeRedisClient(raw),

@@ -90,6 +90,7 @@ beforeAll(async () => {
   // flows through the real handler router.
   await startWorker({
     prisma: ownerDatabase,
+    reconciliation: false,
     processor: async (job) => {
       if (job?.data?.requestId?.startsWith('req-poison-')) {
         poisonAttempts.push(job.id)
@@ -122,6 +123,7 @@ describe('dead-letter path', () => {
       {
         type: 'job-event',
         jobId: crypto.randomUUID(),
+        jobVersion: 0,
         organizationId: crypto.randomUUID(),
         requestId,
       },

@@ -17,6 +17,7 @@ function jobEventPayload(overrides = {}) {
   return {
     type: 'job-event',
     jobId: crypto.randomUUID(),
+    jobVersion: 0,
     organizationId: crypto.randomUUID(),
     requestId: crypto.randomUUID(),
     ...overrides,
@@ -55,6 +56,7 @@ describe('queue payload contracts', () => {
   it('rejects payloads missing IDs, organization ID, type, or request ID', () => {
     for (const payload of [
       { ...jobEventPayload(), jobId: undefined },
+      { ...jobEventPayload(), jobVersion: undefined },
       { ...jobEventPayload(), organizationId: undefined },
       { ...jobEventPayload(), requestId: undefined },
       { ...jobEventPayload(), type: undefined },

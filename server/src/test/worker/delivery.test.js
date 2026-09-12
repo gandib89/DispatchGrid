@@ -27,6 +27,7 @@ function jobEventPayload(overrides = {}) {
   return {
     type: 'job-event',
     jobId: crypto.randomUUID(),
+    jobVersion: 0,
     organizationId: crypto.randomUUID(),
     requestId: `req-${crypto.randomUUID()}`,
     ...overrides,
@@ -96,18 +97,22 @@ describe('at-least-once delivery', () => {
       requestId: `req-kill-${crypto.randomUUID()}`,
     })
 
-    // First delivery dies before ack (retryable throw, never returns), every
-    // later delivery runs the real router. Restarting the worker between the
-    // two is the kill: the unacked job must come back, exactly once.
+    // First delivery never acknowledges. Force-closing the worker leaves its
+    // lock behind; a new worker must recover the stalled job after restart.
     let attempts = 0
     const processor = async (bullJob) => {
       attempts += 1
-      if (attempts === 1) throw new Error('simulated crash: killed before ack')
+      if (attempts === 1) return new Promise(() => {})
       return routeQueueJob(bullJob, { prisma: ownerDatabase })
     }
 
     let events = null
-    await startWorker({ prisma: ownerDatabase, processor })
+    await startWorker({
+      prisma: ownerDatabase,
+      processor,
+      reconciliation: false,
+      workerOptions: { lockDuration: 500, stalledInterval: 100 },
+    })
     try {
       events = await openQueueEvents(QUEUE_NAMES.jobEvents)
       const enqueued = await enqueueJobEvent(payload)
@@ -118,9 +123,14 @@ describe('at-least-once delivery', () => {
       const midJob = await getQueue(QUEUE_NAMES.jobEvents).getJob(enqueued.id)
       expect(await midJob.getState()).not.toBe('completed')
 
-      // Kill (stop without ack) and restart: a new worker generation consumes.
-      await stopWorker()
-      await startWorker({ prisma: ownerDatabase, processor })
+      // Force close models process death: do not drain or acknowledge active work.
+      await stopWorker('SIGKILL', { force: true })
+      await startWorker({
+        prisma: ownerDatabase,
+        processor,
+        reconciliation: false,
+        workerOptions: { lockDuration: 500, stalledInterval: 100 },
+      })
 
       const done = await waitUntil('redelivery completion', async () => {
         const current = await getQueue(QUEUE_NAMES.jobEvents).getJob(enqueued.id)
@@ -150,7 +160,7 @@ describe('at-least-once delivery', () => {
     const { organization, job } = await createJobRow()
 
     let events = null
-    await startWorker({ prisma: ownerDatabase })
+    await startWorker({ prisma: ownerDatabase, reconciliation: false })
     try {
       events = await openQueueEvents(QUEUE_NAMES.jobEvents)
       const queue = getQueue(QUEUE_NAMES.jobEvents)
@@ -213,7 +223,7 @@ describe('at-least-once delivery', () => {
     })
 
     let events = null
-    await startWorker({ prisma: ownerDatabase })
+    await startWorker({ prisma: ownerDatabase, reconciliation: false })
     try {
       events = await openQueueEvents(QUEUE_NAMES.jobEvents)
       const queue = getQueue(QUEUE_NAMES.jobEvents)

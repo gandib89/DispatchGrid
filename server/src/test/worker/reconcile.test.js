@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { QUEUE_NAMES, closeQueues, enqueueJobEvent, getQueue } from '../../lib/queue/index.js'
+import { startWorker, stopWorker } from '../../worker.js'
 import { reconcileJobEvents } from '../../worker/reconcile.js'
 import { routeQueueJob } from '../../worker/handlers/index.js'
 import {
@@ -82,6 +83,15 @@ async function queuedJobEventIds() {
   return jobs.map((job) => job?.data?.jobId).filter(Boolean)
 }
 
+async function queuedJobEventVersions(jobId) {
+  const jobs = await getQueue(QUEUE_NAMES.jobEvents).getJobs(
+    ['waiting', 'active', 'delayed', 'paused', 'completed', 'failed'],
+    0,
+    1000,
+  )
+  return jobs.filter((entry) => entry?.data?.jobId === jobId).map((entry) => entry.data.jobVersion)
+}
+
 beforeEach(async () => {
   await resetDatabase(ownerDatabase)
   for (const name of Object.values(QUEUE_NAMES)) {
@@ -100,6 +110,7 @@ describe('reconciliation failure drill', () => {
     const payload = {
       type: 'job-event',
       jobId: job.id,
+      jobVersion: job.version,
       organizationId: job.organizationId,
       requestId: `req-${crypto.randomUUID()}`,
     }
@@ -122,7 +133,7 @@ describe('reconciliation failure drill', () => {
     expect(await queuedJobEventIds()).not.toContain(job.id)
 
     // The sweep repairs through the real T1 producer against real Redis.
-    const result = await reconcileJobEvents({ prisma: ownerDatabase })
+    const result = await reconcileJobEvents({ prisma: ownerDatabase, limit: 1 })
 
     expect(result).toMatchObject({ checked: 1, requeued: 1, requeuedJobIds: [job.id] })
     expect(await queuedJobEventIds()).toContain(job.id)
@@ -154,30 +165,77 @@ describe('reconciliation failure drill', () => {
     await enqueueJobEvent({
       type: 'job-event',
       jobId: job.id,
+      jobVersion: job.version,
       organizationId: organization.id,
       requestId: `req-${crypto.randomUUID()}`,
     })
 
-    const result = await reconcileJobEvents({ prisma: ownerDatabase })
+    const result = await reconcileJobEvents({ prisma: ownerDatabase, limit: 1 })
 
     expect(result).toMatchObject({ checked: 1, requeued: 0, requeuedJobIds: [] })
     expect((await queuedJobEventIds()).filter((id) => id === job.id)).toHaveLength(1)
   })
 
-  it('never resurrects terminal jobs: only non-terminal work qualifies for repair', async () => {
+  it('repairs terminal transitions because consumers reread state and safely no-op', async () => {
     const completed = await commitJobWithStatus('COMPLETED')
     const cancelled = await commitJobWithStatus('CANCELLED')
     const failed = await commitJobWithStatus('FAILED')
     const { job: active } = await commitJobRow()
 
-    const result = await reconcileJobEvents({ prisma: ownerDatabase })
+    const result = await reconcileJobEvents({ prisma: ownerDatabase, limit: 1 })
 
-    expect(result).toMatchObject({ checked: 1, requeued: 1, requeuedJobIds: [active.id] })
+    expect(result).toMatchObject({ checked: 4, requeued: 4 })
     const queued = await queuedJobEventIds()
     expect(queued).toContain(active.id)
-    expect(queued).not.toContain(completed.job.id)
-    expect(queued).not.toContain(cancelled.job.id)
-    expect(queued).not.toContain(failed.job.id)
+    expect(queued).toContain(completed.job.id)
+    expect(queued).toContain(cancelled.job.id)
+    expect(queued).toContain(failed.job.id)
+  })
+
+  it('runs reconciliation when the worker starts', async () => {
+    const { job } = await commitJobRow()
+
+    await startWorker({ prisma: ownerDatabase, reconciliationIntervalMs: 0 })
+    try {
+      const deadline = Date.now() + 10_000
+      for (;;) {
+        if ((await queuedJobEventIds()).includes(job.id)) break
+        if (Date.now() > deadline) throw new Error('startup reconciliation did not enqueue work')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+    } finally {
+      await stopWorker()
+    }
+  })
+
+  it('repairs a later committed version even when an older event for the job is retained', async () => {
+    const { organization, job } = await commitJobRow()
+    await enqueueJobEvent({
+      type: 'job-event',
+      jobId: job.id,
+      jobVersion: job.version,
+      organizationId: organization.id,
+      requestId: `req-${crypto.randomUUID()}`,
+    })
+    const updated = await ownerDatabase.job.update({
+      where: { id: job.id },
+      data: { version: { increment: 1 } },
+    })
+    await ownerDatabase.jobEvent.create({
+      data: {
+        organizationId: organization.id,
+        jobId: job.id,
+        toStatus: job.status,
+        reason: 'Later committed update',
+      },
+    })
+
+    const result = await reconcileJobEvents({ prisma: ownerDatabase })
+
+    expect(result).toMatchObject({ checked: 1, requeued: 1, requeuedJobIds: [job.id] })
+    expect(await queuedJobEventVersions(job.id)).toEqual(
+      expect.arrayContaining([job.version, updated.version]),
+    )
   })
 
   it('reports zero work when nothing is committed', async () => {

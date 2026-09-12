@@ -24,6 +24,7 @@ export function queueSchemas(z) {
     .extend({
       type: z.literal('job-event'),
       jobId: z.string().uuid(),
+      jobVersion: z.number().int().nonnegative(),
     })
     .strict()
 

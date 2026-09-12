@@ -1,10 +1,15 @@
 import { pathToFileURL } from 'node:url'
-import { Worker, createNodeRedisClient } from 'bullmq'
+import { Worker } from 'bullmq'
 import { prisma } from './db/client.js'
 import { logger } from './lib/logger.js'
-import { QUEUE_NAMES, closeQueues, deadLetterIfExhausted } from './lib/queue/index.js'
-import { createRedisClient } from './lib/redis.js'
+import {
+  QUEUE_NAMES,
+  closeQueues,
+  createWorkerConnection,
+  deadLetterIfExhausted,
+} from './lib/queue/index.js'
 import { routeQueueJob } from './worker/handlers/index.js'
+import { reconcileJobEvents } from './worker/reconcile.js'
 
 // Second entrypoint (B11-T2): consumes the T1 queues through a validating
 // handler router. Logging, database, Redis, handler registration — no HTTP
@@ -24,15 +29,18 @@ export async function startWorker(options = {}) {
   const {
     prisma: database = prisma,
     processor = (job) => routeQueueJob(job, { prisma: database, log: logger }),
+    workerOptions = {},
+    reconciliation = true,
+    reconciliationIntervalMs = 60_000,
   } = options
 
   const rawClients = []
   const workers = []
 
   for (const name of [QUEUE_NAMES.jobEvents, QUEUE_NAMES.sla]) {
-    const raw = createRedisClient()
+    const { raw, connection } = createWorkerConnection()
     rawClients.push(raw)
-    const worker = new Worker(name, processor, { connection: createNodeRedisClient(raw) })
+    const worker = new Worker(name, processor, { ...workerOptions, connection })
     worker.on('failed', (job, error) => {
       logger.error(
         { queue: name, jobId: job?.id, requestId: job?.data?.requestId, error },
@@ -62,21 +70,42 @@ export async function startWorker(options = {}) {
     'DispatchGrid worker started',
   )
 
-  runtime = { workers, rawClients, database }
+  runtime = { workers, rawClients, database, reconciliationTimer: null }
+  if (reconciliation) {
+    let sweepRunning = false
+    const sweep = async () => {
+      if (sweepRunning) return
+      sweepRunning = true
+      try {
+        await reconcileJobEvents({ prisma: database })
+      } catch (error) {
+        logger.error({ error }, 'Reconciliation sweep failed')
+      } finally {
+        sweepRunning = false
+      }
+    }
+    await sweep()
+    if (reconciliationIntervalMs > 0) {
+      runtime.reconciliationTimer = setInterval(() => void sweep(), reconciliationIntervalMs)
+      runtime.reconciliationTimer.unref()
+    }
+  }
   return runtime
 }
 
-export async function stopWorker(signal = 'SIGTERM') {
+export async function stopWorker(signal = 'SIGTERM', { force = false } = {}) {
   if (!runtime) return
 
-  const { workers, rawClients, database } = runtime
+  const { workers, rawClients, database, reconciliationTimer } = runtime
   runtime = null
 
   logger.info({ signal }, 'Worker shutdown started')
 
+  if (reconciliationTimer) clearInterval(reconciliationTimer)
+
   // Drain, not abandon: stop fetching, finish the current job, then close.
   for (const worker of workers) {
-    await worker.close()
+    await worker.close(force)
   }
   await closeQueues()
   for (const raw of rawClients) {

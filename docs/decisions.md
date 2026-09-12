@@ -1,11 +1,35 @@
 # DispatchGrid decision log
 
-## DG-2 — Redis persistence (resolved, B11-T4)
+## DG-1 — Failed job state (resolved, B06)
 
-**Verdict: reconcile choice.** Accept possible delayed-job loss on
-non-persistent hosted Redis tiers, and repair it with a reconciliation sweep.
-This is the stronger production and interview choice per `Dispatch_plan.md`
-§5 (DG-2). Status: implemented — see `server/src/worker/reconcile.js` and
+**Verdict:** retain `FAILED` as a terminal state. It is reachable through
+`POST /api/v1/jobs/:id/fail`, requires `job.respond` plus a reason, retains the
+current assignee, and is covered by domain, service, route, and database tests.
+
+## DG-3 — Recommendation ledger
+
+- **No soft deletion: accepted.** Core records remain auditable through status
+  and immutable event/history rows; no `deletedAt` convention is introduced.
+- **One GCP project with isolated staging services/database: accepted.** This is
+  the C19 deployment target; staging and production never share a database.
+- **SLA policy edits do not reschedule existing jobs: accepted.** Only newly
+  assigned jobs use the edited policy, as also recorded in `docs/domain.md`.
+- **Nullable `LocationPing.jobId`: accepted.** B14 may store an agent location
+  without associating it with a job.
+- **OpenAPI generation: overridden.** No OpenAPI surface is planned for the
+  current build; shared strict Zod contracts remain the executable boundary.
+- **`/readyz` checks PostgreSQL and Redis: accepted.** The endpoint belongs to
+  C19; `/healthz` remains a process-only liveness check.
+- **LedgerLine supporting-table DDL reuse: overridden.** DispatchGrid owns its
+  schema through Prisma models and reviewed migrations as each component lands.
+
+## DG-2 — Redis persistence and B11 recovery (resolved, B11-T4)
+
+**Verdict:** local Redis uses AOF persistence. No production Redis tier is
+selected yet, so loss of generic delayed SLA jobs is explicitly accepted in
+B11; B12 must revisit that choice when durable SLA thresholds and Escalations
+exist. B11's recoverable job-event enqueue gap is repaired independently by
+`server/src/worker/reconcile.js` and proven in
 `server/src/test/worker/reconcile.test.js`.
 
 ### Evidence
@@ -27,8 +51,9 @@ This is the stronger production and interview choice per `Dispatch_plan.md`
 - Redis holds no irreplaceable business fact: BullMQ storage, fan-out, rate
   limits, latest positions, narrow caches only. PostgreSQL is the sole source
   of truth — wiping Redis loses at most pending async work.
-- `reconcileJobEvents` finds recently committed jobs with no `job-event` in
-  any BullMQ state and re-enqueues them through the T1 producer. The
+- `reconcileJobEvents` compares each job's durable version with retained
+  `job-event` payload versions in every BullMQ state and re-enqueues missing
+  current versions through the T1 producer, including terminal transitions. The
   threshold-based SLA variant (active jobs past threshold without an
   `Escalation`) lands with the `Escalation` table in B12; poison inspection
   is the T5 dead-letter path.
@@ -46,7 +71,7 @@ This is the stronger production and interview choice per `Dispatch_plan.md`
   `server/src/test/worker/handlers.test.js` and the T4 failure drill in
   `server/src/test/worker/reconcile.test.js`.
 - The transactional outbox pattern stays unjustified: a single sweep over
-  durable `JobEvent` rows covers the enqueue gap, and no measured loss
+  durable `Job` versions covers the current-state enqueue gap, and no measured loss
   trigger has appeared. Revisit if sweep cost or loss rate says otherwise.
 
 ## Scale plan — API scale-to-zero, worker min-instances=1 (story 8)
@@ -69,8 +94,8 @@ not add a Redis-backed limiter without revisiting this policy.
 ## Reconcile framing — B11 sweep vs B12 SLA variant
 
 **Verdict:** the B11 sweep (`reconcileJobEvents`) repairs commit-without-enqueue
-only: recently committed non-terminal jobs with no `job-event` in any BullMQ
-state are re-enqueued through the T1 producer. Terminal jobs
-(`COMPLETED`/`CANCELLED`/`FAILED`) never qualify. The threshold-based SLA
-variant (active jobs past threshold without an `Escalation`) lands with the
+by comparing durable Job versions with retained queue payload versions and
+re-enqueuing any missing current version through the T1 producer. Terminal
+transitions qualify and are safe because consumers reread PostgreSQL. The
+threshold-based SLA variant (active jobs past threshold without an `Escalation`) lands with the
 `Escalation` table in B12, as does the `sla-check` threshold vocabulary.

@@ -15,7 +15,7 @@ export async function handleJobEvent(payload, deps = {}) {
     schema: schemas.jobEventPayloadSchema,
     unprocessablePrefix: 'Unprocessable job-event payload',
     missingLog: 'job-event for unknown job; acknowledging as no-op',
-    found: (job, data, log) => {
+    onJobFound: (job, data, log) => {
       log.info({ jobStatus: job.status }, 'Consumed job event')
       return { status: 'consumed', jobId: job.id, requestId: data.requestId }
     },
