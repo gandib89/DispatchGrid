@@ -1,4 +1,4 @@
-import { Queue, UnrecoverableError } from 'bullmq'
+import { Queue, UnrecoverableError, createNodeRedisClient } from 'bullmq'
 import { z } from 'zod'
 import { SLA_THRESHOLDS, queueSchemas } from '../../../../shared/queue-schema.js'
 import { logger } from '../logger.js'
@@ -56,6 +56,11 @@ export function getQueue(name) {
     queues.set(name, new Queue(name, { connection: getConnection(), defaultJobOptions: queueDefaults }))
   }
   return queues.get(name)
+}
+
+export function createWorkerConnection() {
+  const raw = createRedisClient()
+  return { raw, connection: createNodeRedisClient(raw) }
 }
 
 // After-commit-only: enqueue a validated job event (minimal IDs + request ID).

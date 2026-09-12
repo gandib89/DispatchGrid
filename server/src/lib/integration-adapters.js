@@ -18,6 +18,7 @@ export const integrationAdapters = {
     await enqueueJobEvent({
       type: 'job-event',
       jobId: payload.jobId,
+      jobVersion: payload.jobVersion,
       organizationId: payload.organizationId,
       requestId: payload.requestId,
     })

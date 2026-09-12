@@ -8,46 +8,61 @@ import { logger } from '../lib/logger.js'
 // the T2 handler router's `deps.prisma`, never imports services, and never
 // enqueues inside a transaction.
 //
-// ponytail: O(n) queue scan per run (BullMQ range read + in-memory jobId set);
+// ponytail: O(n) queue scan per run (BullMQ range read + in-memory version map);
 // switch to deterministic BullMQ jobIds + getJob when volume matters.
 // Threshold vocabulary lands in B12 with the Escalation table.
 const QUEUE_SCAN_TYPES = ['waiting', 'active', 'delayed', 'paused', 'completed', 'failed']
 const QUEUE_SCAN_CAP = 1000
 
-// Terminal states never qualify for repair: finished work must not resurrect.
-const TERMINAL_JOB_STATUSES = Object.freeze(['COMPLETED', 'CANCELLED', 'FAILED'])
-
 export async function reconcileJobEvents({ prisma, limit = 100, log = logger } = {}) {
   if (!prisma) {
     throw new Error('reconcileJobEvents requires a prisma client')
   }
-
-  const jobs = await prisma.job.findMany({
-    where: { status: { notIn: [...TERMINAL_JOB_STATUSES] } },
-    orderBy: { updatedAt: 'desc' },
-    take: limit,
-    select: { id: true, organizationId: true },
-  })
-
-  if (jobs.length === 0) {
-    return { checked: 0, requeued: 0, requeuedJobIds: [] }
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error('reconcileJobEvents limit must be a positive integer')
   }
 
   const queued = await getQueue(QUEUE_NAMES.jobEvents).getJobs(QUEUE_SCAN_TYPES, 0, QUEUE_SCAN_CAP)
-  const seen = new Set(queued.map((job) => job?.data?.jobId).filter(Boolean))
-
-  const requeuedJobIds = []
-  for (const job of jobs.filter((candidate) => !seen.has(candidate.id))) {
-    await enqueueJobEvent({
-      type: 'job-event',
-      jobId: job.id,
-      organizationId: job.organizationId,
-      requestId: `reconcile-${job.id}`,
-    })
-    requeuedJobIds.push(job.id)
+  const queuedVersions = new Map()
+  for (const entry of queued) {
+    const { jobId, jobVersion } = entry?.data ?? {}
+    if (!jobId || !Number.isInteger(jobVersion)) continue
+    queuedVersions.set(jobId, Math.max(queuedVersions.get(jobId) ?? -1, jobVersion))
   }
 
-  const result = { checked: jobs.length, requeued: requeuedJobIds.length, requeuedJobIds }
+  let checked = 0
+  let cursor
+  const requeuedJobIds = []
+  for (;;) {
+    const jobs = await prisma.job.findMany({
+      orderBy: { id: 'asc' },
+      take: limit,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      select: { id: true, organizationId: true, version: true },
+    })
+    if (jobs.length === 0) break
+
+    checked += jobs.length
+    const missing = jobs.filter(
+      (candidate) => (queuedVersions.get(candidate.id) ?? -1) < candidate.version,
+    )
+    for (const job of missing) {
+      await enqueueJobEvent({
+        type: 'job-event',
+        jobId: job.id,
+        jobVersion: job.version,
+        organizationId: job.organizationId,
+        requestId: `reconcile-${job.id}-v${job.version}`,
+      })
+      queuedVersions.set(job.id, job.version)
+      requeuedJobIds.push(job.id)
+    }
+
+    cursor = jobs.at(-1).id
+    if (jobs.length < limit) break
+  }
+
+  const result = { checked, requeued: requeuedJobIds.length, requeuedJobIds }
   log.info(result, 'Reconciliation sweep complete')
   return result
 }

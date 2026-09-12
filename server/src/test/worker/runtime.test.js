@@ -23,6 +23,7 @@ function jobEventPayload(overrides = {}) {
   return {
     type: 'job-event',
     jobId: crypto.randomUUID(),
+    jobVersion: 0,
     organizationId: crypto.randomUUID(),
     requestId: `req-${crypto.randomUUID()}`,
     ...overrides,
@@ -104,6 +105,7 @@ describe('worker drain', () => {
     let processorResult
     await startWorker({
       prisma: ownerDatabase,
+      reconciliation: false,
       processor: async (job) => {
         seen.push(job.id)
         await gate

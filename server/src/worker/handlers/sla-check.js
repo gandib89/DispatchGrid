@@ -55,7 +55,7 @@ export async function handleSlaCheck(payload, deps = {}) {
     schema: schemas.slaCheckPayloadSchema,
     unprocessablePrefix: 'Unprocessable sla-check payload',
     missingLog: 'sla-check for unknown job; acknowledging as no-op',
-    found: async (job, data, log) => {
+    onJobFound: async (job, data, log) => {
       if (TERMINAL_JOB_STATUSES.includes(job.status)) {
         log.info({ jobStatus: job.status, threshold: data.threshold }, 'SLA check on terminal job; acknowledging as no-op')
         return { status: 'sla-terminal-noop', jobId: job.id, requestId: data.requestId, threshold: data.threshold }
@@ -77,7 +77,7 @@ export async function handleSlaCheck(payload, deps = {}) {
           threshold: data.threshold,
           requestId: data.requestId,
         })
-        await enqueue({ jobId: job.id, organizationId: job.organizationId, requestId: data.requestId })
+        await enqueue({ jobId: job.id, organizationId: job.organizationId, jobVersion: job.version, requestId: data.requestId })
       }
 
       let escalation
