@@ -74,3 +74,23 @@ state are re-enqueued through the T1 producer. Terminal jobs
 (`COMPLETED`/`CANCELLED`/`FAILED`) never qualify. The threshold-based SLA
 variant (active jobs past threshold without an `Escalation`) lands with the
 `Escalation` table in B12, as does the `sla-check` threshold vocabulary.
+
+## DG-4 — SLA breach timing formula (resolved, B12-T1)
+
+**Verdict:** warning and breach evaluation times derive from the job deadline
+as `warningAt = dueAt − warningMinutesBefore` and
+`breachAt = dueAt + breachMinutesAfter`. Offset zero is valid on both sides:
+a zero `warningMinutesBefore` warns exactly at `dueAt`, and a zero
+`breachMinutesAfter` breaches exactly at `dueAt` (the nonnegative-threshold
+CHECK permits zero; proven by `server/src/test/db/sla-constraints.test.js`).
+Status: recorded; scheduling and handler enforcement land in B12-T2/T3.
+
+## A-6 — no rescheduling on policy edit (resolved, B12-T1)
+
+**Verdict:** editing an SLA policy applies only to newly assigned jobs. Already
+enqueued delayed warning/breach work keeps the thresholds promised at
+assignment time and is never rescheduled. Rationale: an assignment is a
+promise made with specific thresholds; silently shifting existing timers would
+rewrite that promise. Handler-side safety comes from re-reading tenant-scoped
+job and policy data before acting, so stale timers against terminal jobs are
+safe no-ops. Status: recorded; assignment-time snapshotting lands in B12-T2.
