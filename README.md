@@ -1,7 +1,7 @@
 # DispatchGrid
 
 DispatchGrid is a field-service dispatch platform. This repository currently contains the B00
-through B08 foundation from `Dispatch_plan.md`: a React/Vite client, an Express API with
+through B11 foundation from `Dispatch_plan.md`: a React/Vite client, an Express API with
 identity, organization/RBAC pipeline, shared contracts, pure job-domain rules,
 database-enforced job truth, and transactional job services, Prisma for PostgreSQL, and Redis
 for worker/cache infrastructure.
@@ -36,9 +36,14 @@ for worker/cache infrastructure.
   idempotency (replay, in-flight 409, reuse 422), atomic create/patch/start/complete/cancel/
   fail with ownership checks, and an ESLint boundary banning HTTP/queue/socket imports from
   services.
+- **B09/C09:** assignment offers, accept/decline/reassign flows, deterministic suggestions,
+  tenant ownership checks, and two-dispatcher race handling.
+- **B10/C10:** job create/detail/board/timeline routes, lifecycle transitions, post-commit
+  integration seams, and bounded board caching.
+- **B11/C11:** shared BullMQ contracts, centralized queue connections, a separate worker,
+  version-aware enqueue reconciliation, delayed-work and dead-letter paths, and delivery proofs.
 
-The next component is B09/C09: assignment service with the two-dispatcher race core
-(tracked as issues #13–#18 under spec #2).
+The next component is B12/C12: durable, time-driven SLA warnings and breaches.
 
 ## Prerequisites
 
@@ -146,10 +151,9 @@ Local defaults live in `server/.env.example`. The actual `server/.env` file is i
 
 ## Current boundary
 
-This completes B00/C00 through B08/C08, not the full product. Assignment concurrency
-(B09, spec #2 with tickets #13–#18), HTTP routes, BullMQ handlers, Socket.IO authentication,
-tracking, file uploads, and production deployment are implemented in later components of
-`Dispatch_plan.md`.
+This completes B00/C00 through B11/C11, not the full product. SLA policy effects,
+notifications, Socket.IO authentication, tracking, file uploads, and production deployment
+are implemented in later components of `Dispatch_plan.md`.
 
 ## B00/B01 verification evidence
 

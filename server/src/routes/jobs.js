@@ -1,10 +1,12 @@
 import { Router } from 'express'
 import { z } from 'zod'
+import crypto from 'node:crypto'
 import { prisma } from '../db/client.js'
 import { authenticate } from '../middleware/authenticate.js'
 import { actorFrom, authorize } from '../middleware/authorize.js'
 import { resolveTenant } from '../middleware/resolve-tenant.js'
 import { auditLog } from '../middleware/audit-log.js'
+import { getRequestContext } from '../lib/request-context.js'
 import { jobSchemas } from '../../../shared/job-schema.js'
 import { cancelJob, completeJob, createJob, failJob, patchJob, startJob } from '../services/job-service.js'
 import { acceptJob, assignJob, declineJob } from '../services/assignment-service.js'
@@ -12,6 +14,7 @@ import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
 import { serializeAssignment, serializeEvent, serializeJob } from '../serializers/job-serializer.js'
 import { afterJobCommit as runPostCommitHooks } from '../lib/integration-adapters.js'
+import { recordEnqueueFailure } from '../lib/queue/metrics.js'
 
 // B10-T2/T3/T4 (built): transitions (PATCH, start/complete/cancel/fail),
 // suggestions, timeline/events. They reuse this pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
@@ -66,17 +69,22 @@ export function clearBoardCache() {
   boardCache.clear()
 }
 
-// Post-commit seam (T4 no-ops): commit already happened inside the service;
-// a throwing hook must never fail the request or the board.
+// Post-commit seam (T4 no-ops + B11-T2 real enqueue): commit already happened
+// inside the service; a throwing hook must never fail the request or the board.
+// The failure is warned (logged) and counted (metered via queueMetrics); the
+// committed business state stands and reconciliation (T4) repairs the gap.
 async function afterJobCommit(req, actor, job) {
   invalidateBoardCache(actor.organizationId)
   try {
     await runPostCommitHooks({
       jobId: job.id,
+      jobVersion: job.version,
       organizationId: actor.organizationId,
       status: job.status,
+      requestId: req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID(),
     })
   } catch (error) {
+    recordEnqueueFailure()
     req.log?.warn?.({ error }, 'Post-commit integration hook failed')
   }
 }
