@@ -94,3 +94,23 @@ promise made with specific thresholds; silently shifting existing timers would
 rewrite that promise. Handler-side safety comes from re-reading tenant-scoped
 job and policy data before acting, so stale timers against terminal jobs are
 safe no-ops. Status: recorded; assignment-time snapshotting lands in B12-T2.
+
+## SLA policy selection — earliest-created wins (resolved, B12 review)
+
+**Verdict:** when an organization holds several policies, assignment arms the
+job's clock from the earliest-created policy (`createdAt`, then `id` as the
+tiebreak) until a job→policy association exists. This is an explicit stopgap,
+not a ranking: no priority, specificity, or job-type matching is implied.
+Re-assign counts as a new assignment — it drops the stale pair and re-arms
+from the current earliest policy. Status: recorded and pinned by a
+multi-policy test; replace with a real association when a second selection
+signal is needed. Do not build policy association on this ticket.
+
+## B11→B12 queue upgrade — legacy sla-check timers drain as no-ops
+
+**Verdict:** B11 delayed `sla-check` timers carry no threshold promise and fail
+B12 strict parsing. Both the router and the handler recognize that shape and
+acknowledge it (`sla-legacy-noop` — no writes, no fan-out) instead of
+poisoning it onto the dead-letter path. Upgrade path: deploy freely — stale
+B11 timers drain harmlessly while every new assignment arms threshold
+payloads. No Redis drain or obliteration required.

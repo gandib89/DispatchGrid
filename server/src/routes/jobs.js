@@ -14,7 +14,6 @@ import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
 import { serializeAssignment, serializeEvent, serializeJob } from '../serializers/job-serializer.js'
 import { afterJobCommit as runPostCommitHooks, scheduleSlaAfterAssign } from '../lib/integration-adapters.js'
-import { allowedNextStates } from '../lib/jobs/state-machine.js'
 import { removePendingSlaEvaluations } from '../lib/queue/index.js'
 import { recordEnqueueFailure } from '../lib/queue/metrics.js'
 
@@ -90,14 +89,17 @@ async function afterJobCommit(req, actor, job) {
     req.log?.warn?.({ error }, 'Post-commit integration hook failed')
   }
   // B12-T3: arm the clock on the transition that creates the promise (assign
-  // lands on ASSIGNED) and disarm it on terminal transitions. After commit
-  // only — this runs once the service promise has resolved, never inside the
+  // lands on ASSIGNED) and disarm it on every other transition. Anything past
+  // the promise — decline back to PENDING, accept/start progress, terminal
+  // moves — drops the stale pair: a surviving timer would escalate a job that
+  // no longer carries the assignment it was armed for. After commit only —
+  // this runs once the service promise has resolved, never inside the
   // transaction. A throwing hook never fails the request: the committed
   // business state stands and the failure is warned and metered.
   try {
     if (job.status === 'ASSIGNED') {
       await scheduleSlaAfterAssign({ job, organizationId: actor.organizationId, requestId })
-    } else if (allowedNextStates(job.status).length === 0) {
+    } else {
       await removePendingSlaEvaluations(job.id)
     }
   } catch (error) {

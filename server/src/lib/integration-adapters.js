@@ -4,7 +4,12 @@
 // nothing may enqueue, publish, or invalidate inside a transaction.
 import { prisma } from '../db/client.js'
 import { logger } from './logger.js'
-import { enqueueJobEvent, scheduleSlaCheck, slaDelayMs } from './queue/index.js'
+import {
+  enqueueJobEvent,
+  removePendingSlaEvaluations,
+  scheduleSlaCheck,
+  slaDelayMs,
+} from './queue/index.js'
 
 export const integrationAdapters = {
   // Realtime fan-out lands in B15.
@@ -16,6 +21,21 @@ export const integrationAdapters = {
       organizationId: payload.organizationId,
       requestId: payload.requestId,
     })
+  },
+  // Breach fan-out (B12): the worker's production path resolves breach side
+  // effects through this named seam, backed by the existing realtime publish
+  // and job-events queue above — never by ad-hoc fallbacks at the call site.
+  async publishEscalationEvent(payload) {
+    await integrationAdapters.publishJobEvent({
+      jobId: payload.jobId,
+      organizationId: payload.organizationId,
+      escalationId: payload.escalationId,
+      threshold: payload.threshold,
+      requestId: payload.requestId,
+    })
+  },
+  async enqueueEscalationNotification(payload) {
+    await integrationAdapters.enqueueJobWork(payload)
   },
 }
 
@@ -52,6 +72,9 @@ export async function scheduleSlaAfterAssign({ job, organizationId, requestId })
     breachMinutesAfter: policy.breachMinutesAfter,
     dueAt,
   }
+  // A re-assign IS a new assignment (A-6): drop the stale pair first so the
+  // fresh promise wins instead of collapsing onto it via deterministic IDs.
+  await removePendingSlaEvaluations(job.id)
   return Promise.all(
     ['WARNING', 'BREACH'].map((threshold) =>
       scheduleSlaCheck(

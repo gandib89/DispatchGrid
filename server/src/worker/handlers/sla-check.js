@@ -2,11 +2,31 @@ import { z } from 'zod'
 import { queueSchemas } from '../../../../shared/queue-schema.js'
 import { consumeJob } from './consume-job.js'
 import { integrationAdapters } from '../../lib/integration-adapters.js'
+import { logger } from '../../lib/logger.js'
 
 const schemas = queueSchemas(z)
 
 // Terminal states never escalate (DG-1: FAILED is retained as terminal).
 const TERMINAL_JOB_STATUSES = Object.freeze(['COMPLETED', 'CANCELLED', 'FAILED'])
+
+// Pre-B12 (B11) delayed timers carried no threshold promise — just the job
+// identity. They fail the strict threshold schema below, so recognize them
+// here and acknowledge them as no-ops: the upgrade drains instead of
+// poisoning (see docs/decisions.md, B11→B12 upgrade).
+const legacySlaCheckPayloadSchema = z.object({
+  type: z.literal('sla-check'),
+  jobId: z.string().uuid(),
+  organizationId: z.string().uuid(),
+  requestId: z.string().min(1).max(128),
+})
+
+export function isLegacySlaCheck(payload) {
+  return (
+    payload?.type === 'sla-check' &&
+    payload?.threshold === undefined &&
+    legacySlaCheckPayloadSchema.safeParse(payload).success
+  )
+}
 
 function isUniqueViolation(error) {
   return error?.code === 'P2002'
@@ -20,6 +40,16 @@ function isUniqueViolation(error) {
 // throw for redelivery. Breach side effects (notification enqueue, realtime
 // publish) run only after the commit, never inside the transaction.
 export async function handleSlaCheck(payload, deps = {}) {
+  if (isLegacySlaCheck(payload)) {
+    const log = (deps.log ?? logger).child({
+      handler: 'sla-check',
+      requestId: payload.requestId,
+      jobId: payload.jobId,
+      organizationId: payload.organizationId,
+    })
+    log.info('Pre-B12 sla-check payload without a threshold promise; acknowledging as no-op')
+    return { status: 'sla-legacy-noop', jobId: payload.jobId, requestId: payload.requestId }
+  }
   return consumeJob(payload, deps, {
     handler: 'sla-check',
     schema: schemas.slaCheckPayloadSchema,
@@ -37,17 +67,44 @@ export async function handleSlaCheck(payload, deps = {}) {
       const nextSlaState =
         data.threshold === 'BREACH' ? 'BREACHED' : job.slaState === 'BREACHED' ? 'BREACHED' : 'WARNING'
 
+      const publishBreachSideEffects = async (escalationId) => {
+        const publish = deps.publishEscalationEvent ?? integrationAdapters.publishEscalationEvent
+        const enqueue = deps.enqueueEscalationNotification ?? integrationAdapters.enqueueEscalationNotification
+        await publish({
+          jobId: job.id,
+          organizationId: job.organizationId,
+          escalationId,
+          threshold: data.threshold,
+          requestId: data.requestId,
+        })
+        await enqueue({ jobId: job.id, organizationId: job.organizationId, requestId: data.requestId })
+      }
+
       let escalation
       try {
         escalation = await deps.prisma.$transaction(async (tx) => {
-          await tx.job.update({ where: { id: job.id }, data: { slaState: nextSlaState } })
+          const claimed = await tx.job.updateMany({
+            where: { id: job.id, organizationId: job.organizationId },
+            data: { slaState: nextSlaState },
+          })
+          if (claimed.count === 0) {
+            throw new Error('SLA job vanished mid-transaction')
+          }
           return tx.escalation.create({
-            data: { organizationId: data.organizationId, jobId: job.id, threshold: data.threshold },
+            data: { organizationId: job.organizationId, jobId: job.id, threshold: data.threshold },
           })
         })
       } catch (error) {
         if (isUniqueViolation(error)) {
           log.info({ threshold: data.threshold }, 'SLA escalation already recorded; acknowledging as complete')
+          if (data.threshold === 'BREACH') {
+            // Post-commit side effects may have died with the first delivery
+            // (the retry lands here via P2002): re-attempt them before acking.
+            const existing = await deps.prisma.escalation
+              .findFirst({ where: { jobId: job.id, threshold: data.threshold } })
+              .catch(() => null)
+            await publishBreachSideEffects(existing?.id)
+          }
           return {
             status: 'sla-escalation-complete',
             jobId: job.id,
@@ -64,16 +121,7 @@ export async function handleSlaCheck(payload, deps = {}) {
       )
 
       if (data.threshold === 'BREACH') {
-        const publish = deps.publishEscalationEvent ?? integrationAdapters.publishJobEvent
-        const enqueue = deps.enqueueEscalationNotification ?? integrationAdapters.enqueueJobWork
-        await publish({
-          jobId: job.id,
-          organizationId: data.organizationId,
-          escalationId: escalation.id,
-          threshold: data.threshold,
-          requestId: data.requestId,
-        })
-        await enqueue({ jobId: job.id, organizationId: data.organizationId, requestId: data.requestId })
+        await publishBreachSideEffects(escalation.id)
       }
 
       return {

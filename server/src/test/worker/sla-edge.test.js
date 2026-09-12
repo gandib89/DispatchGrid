@@ -171,9 +171,10 @@ describe('simultaneous double delivery', () => {
       organizationId: organization.id,
       threshold: 'BREACH',
     })
-    // The loser acknowledged already-complete: breach side effects ran once.
-    expect(hooks.published).toHaveLength(1)
-    expect(hooks.enqueued).toHaveLength(1)
+    // The loser acknowledged already-complete on the durable row, but the
+    // P2002 path re-attempts breach side effects (at-least-once fan-out).
+    expect(hooks.published).toHaveLength(2)
+    expect(hooks.enqueued).toHaveLength(2)
   })
 })
 

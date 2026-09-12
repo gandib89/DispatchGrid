@@ -208,6 +208,37 @@ describe('deterministic scheduling identities', () => {
     expect(warning.id).not.toBe(breach.id)
     expect(await delayedForJob(job.id)).toHaveLength(2)
   })
+
+  it('a settled evaluation never reports armed: re-scheduling re-arms fresh', async () => {
+    const organization = await createOrganizationFixture(ownerDatabase)
+    const user = await createUserFixture(ownerDatabase)
+    const job = await createJobRow(organization, user, new Date(Date.now() + 3_600_000))
+
+    await startWorker({ prisma: ownerDatabase })
+    const raw = createClient({ url: env.REDIS_URL })
+    const queueEvents = new QueueEvents(QUEUE_NAMES.sla, {
+      connection: createNodeRedisClient(raw),
+    })
+    await queueEvents.waitUntilReady()
+    try {
+      const first = await scheduleSlaCheck(slaPayload(job, organization, 'WARNING'), { delay: 500 })
+      const stored = await getQueue(QUEUE_NAMES.sla).getJob(first.id)
+      await stored.waitUntilFinished(queueEvents, 15_000)
+      expect(await (await getQueue(QUEUE_NAMES.sla).getJob(first.id)).getState()).toBe('completed')
+
+      // Collapsing onto the completed entry would report armed with nothing
+      // pending; instead the settled entry is dropped and a fresh delayed
+      // evaluation takes its deterministic identity.
+      const second = await scheduleSlaCheck(slaPayload(job, organization, 'WARNING'), { delay: 60_000 })
+      expect(second.id).toBe(slaCheckJobId(job.id, 'WARNING'))
+      expect(await second.getState()).toBe('delayed')
+      expect(await delayedForJob(job.id)).toHaveLength(1)
+    } finally {
+      await queueEvents.close().catch(() => {})
+      if (raw?.isOpen) await raw.quit().catch(() => {})
+      await stopWorker().catch(() => {})
+    }
+  })
 })
 
 describe('disarm on terminal', () => {
@@ -285,6 +316,66 @@ describe('policy-edit isolation (A-6)', () => {
       scheduleSlaAfterAssign({ job, organizationId: organization.id, requestId: `req-${crypto.randomUUID()}` }),
     ).resolves.toEqual([])
     expect(await delayedForJob(job.id)).toHaveLength(0)
+  })
+
+  it('re-assign drops the stale pair and re-arms from the current policy', async () => {
+    const organization = await createOrganizationFixture(ownerDatabase)
+    const user = await createUserFixture(ownerDatabase)
+    const policy = await createPolicyRow(organization)
+    const job = await createJobRow(organization, user, new Date(Date.now() + 7_200_000))
+
+    await scheduleSlaAfterAssign({
+      job,
+      organizationId: organization.id,
+      requestId: `req-assign-${crypto.randomUUID()}`,
+    })
+    expect(await delayedForJob(job.id)).toHaveLength(2)
+
+    await ownerDatabase.slaPolicy.update({
+      where: { id: policy.id },
+      data: { warningMinutesBefore: 5, breachMinutesAfter: 5 },
+    })
+
+    // A re-assign IS a new assignment: the stale promise is dropped first, so
+    // the fresh thresholds win instead of collapsing onto the old payload.
+    await scheduleSlaAfterAssign({
+      job,
+      organizationId: organization.id,
+      requestId: `req-reassign-${crypto.randomUUID()}`,
+    })
+    const rearmed = await delayedForJob(job.id)
+    expect(rearmed).toHaveLength(2)
+    for (const entry of rearmed) {
+      expect(entry.data).toMatchObject({
+        slaPolicyId: policy.id,
+        warningMinutesBefore: 5,
+        breachMinutesAfter: 5,
+      })
+    }
+  })
+
+  it('earliest-created policy wins until a job-policy association exists', async () => {
+    const organization = await createOrganizationFixture(ownerDatabase)
+    const user = await createUserFixture(ownerDatabase)
+    const first = await createPolicyRow(organization, { createdAt: new Date(Date.now() - 60_000) })
+    await createPolicyRow(organization, { warningMinutesBefore: 5, breachMinutesAfter: 5 })
+    const job = await createJobRow(organization, user, new Date(Date.now() + 7_200_000))
+
+    await scheduleSlaAfterAssign({
+      job,
+      organizationId: organization.id,
+      requestId: `req-assign-${crypto.randomUUID()}`,
+    })
+
+    const armed = await delayedForJob(job.id)
+    expect(armed).toHaveLength(2)
+    for (const entry of armed) {
+      expect(entry.data).toMatchObject({
+        slaPolicyId: first.id,
+        warningMinutesBefore: WARNING_BEFORE_MIN,
+        breachMinutesAfter: BREACH_AFTER_MIN,
+      })
+    }
   })
 })
 
@@ -416,6 +507,67 @@ describe('assign-path hookup over HTTP', () => {
       .set('Idempotency-Key', crypto.randomUUID())
       .send({ version: assigned.body.job.version, reason: 'No longer needed' })
     expect(cancelled.status).toBe(200)
+    expect(await delayedForJob(jobId)).toHaveLength(0)
+  })
+
+  it('decline back to PENDING disarms the armed evaluations', async () => {
+    const { organization, agent, dispatcherToken, agentToken } = await setupSlaOrg()
+    await createPolicyRow(organization)
+    const created = await createJob(dispatcherToken)
+
+    const assigned = await request(app)
+      .post(`/api/v1/jobs/${created.id}/assign`)
+      .set('Authorization', `Bearer ${dispatcherToken}`)
+      .set('Idempotency-Key', crypto.randomUUID())
+      .send({ agentId: agent.id, version: created.version })
+    expect(assigned.status).toBe(200)
+    const jobId = assigned.body.job.id
+    expect(await delayedForJob(jobId)).toHaveLength(2)
+
+    // Decline returns the job to PENDING: the stale pair must not survive to
+    // escalate a job that no longer carries the assignment it was armed for.
+    const declined = await request(app)
+      .post(`/api/v1/jobs/${jobId}/decline`)
+      .set('Authorization', `Bearer ${agentToken}`)
+      .set('Idempotency-Key', crypto.randomUUID())
+      .send({ version: assigned.body.job.version })
+    expect(declined.status).toBe(200)
+    expect(declined.body.job.status).toBe('PENDING')
+    expect(await delayedForJob(jobId)).toHaveLength(0)
+  })
+
+  it('fail disarms the armed evaluations', async () => {
+    const { organization, agent, dispatcherToken, agentToken } = await setupSlaOrg()
+    await createPolicyRow(organization)
+    const created = await createJob(dispatcherToken)
+
+    const assigned = await request(app)
+      .post(`/api/v1/jobs/${created.id}/assign`)
+      .set('Authorization', `Bearer ${dispatcherToken}`)
+      .set('Idempotency-Key', crypto.randomUUID())
+      .send({ agentId: agent.id, version: created.version })
+    expect(assigned.status).toBe(200)
+    const jobId = assigned.body.job.id
+    expect(await delayedForJob(jobId)).toHaveLength(2)
+
+    // Walk to IN_PROGRESS through the owned transitions, then fail.
+    let version = assigned.body.job.version
+    for (const path of ['accept', 'start']) {
+      const response = await request(app)
+        .post(`/api/v1/jobs/${jobId}/${path}`)
+        .set('Authorization', `Bearer ${agentToken}`)
+        .set('Idempotency-Key', crypto.randomUUID())
+        .send({ version })
+      expect(response.status).toBe(200)
+      version = response.body.job.version
+    }
+    const failed = await request(app)
+      .post(`/api/v1/jobs/${jobId}/fail`)
+      .set('Authorization', `Bearer ${agentToken}`)
+      .set('Idempotency-Key', crypto.randomUUID())
+      .send({ version, reason: 'Truck broke down' })
+    expect(failed.status).toBe(200)
+    expect(failed.body.job.status).toBe('FAILED')
     expect(await delayedForJob(jobId)).toHaveLength(0)
   })
 })
