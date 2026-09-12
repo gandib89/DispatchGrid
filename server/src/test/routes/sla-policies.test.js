@@ -260,6 +260,12 @@ describe('PATCH /api/v1/sla-policies/:id', () => {
     expect(crossOrg.status).toBe(404)
     expect(crossOrg.body.error.code).toBe('not_found')
 
+    // The write itself is tenant-scoped: the victim row is untouched.
+    const untouched = await ownerDatabase.slaPolicy.findUniqueOrThrow({
+      where: { id: created.body.policy.id },
+    })
+    expect(untouched).toMatchObject({ warningMinutesBefore: 30, breachMinutesAfter: 15 })
+
     const missing = await request(app)
       .patch(`/api/v1/sla-policies/${crypto.randomUUID()}`)
       .set('Authorization', `Bearer ${adminToken}`)

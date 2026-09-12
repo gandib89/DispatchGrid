@@ -84,26 +84,30 @@ export async function scheduleSlaCheck(payload, options = {}) {
   delete addOptions.jobId
   delete addOptions.delay
   delete addOptions.now
-  try {
-    const job = await queue.add(data.type, data, { ...addOptions, delay, jobId })
-    logger.info(
-      { queue: QUEUE_NAMES.sla, jobId: job.id, requestId: data.requestId, threshold: data.threshold },
-      'Scheduled SLA check',
-    )
-    return job
-  } catch (error) {
-    // A lost-response retry racing the original add lands here: the pending
-    // evaluation already exists, so collapse onto it instead of failing.
-    const existing = await queue.getJob(jobId).catch(() => undefined)
-    if (existing) {
+  // Deterministic IDs collapse re-adds onto the stored evaluation — but only
+  // a still-pending one. BullMQ's add never throws for a duplicate ID; it
+  // hands back the stored job whatever its state, so a settled entry
+  // (completed/failed) would report "armed" with nothing pending. Check first:
+  // collapse onto delayed/waiting/active work, otherwise drop the settled
+  // entry and arm fresh under the same identity.
+  const existing = await queue.getJob(jobId).catch(() => undefined)
+  if (existing) {
+    const state = await existing.getState().catch(() => undefined)
+    if (state === 'delayed' || state === 'waiting' || state === 'active') {
       logger.info(
         { queue: QUEUE_NAMES.sla, jobId, requestId: data.requestId, threshold: data.threshold },
         'SLA check already scheduled; collapsing onto the pending evaluation',
       )
       return existing
     }
-    throw error
+    await existing.remove().catch(() => {})
   }
+  const job = await queue.add(data.type, data, { ...addOptions, delay, jobId })
+  logger.info(
+    { queue: QUEUE_NAMES.sla, jobId: job.id, requestId: data.requestId, threshold: data.threshold },
+    existing ? 'Re-armed SLA check over a settled evaluation' : 'Scheduled SLA check',
+  )
+  return job
 }
 
 // Deterministic BullMQ identity per job and threshold (B12-T3): the same

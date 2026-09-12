@@ -117,20 +117,22 @@ router.patch(
       const params = schemas.slaPolicyIdParamsSchema.parse(req.params)
       const input = schemas.updateSlaPolicySchema.parse(req.body)
       const actor = actorFrom(req)
-      await scopedPolicy(actor, params.id)
-      let policy
+      const data = {
+        ...(input.name !== undefined ? { name: input.name } : {}),
+        ...(input.warningMinutesBefore !== undefined
+          ? { warningMinutesBefore: input.warningMinutesBefore }
+          : {}),
+        ...(input.breachMinutesAfter !== undefined
+          ? { breachMinutesAfter: input.breachMinutesAfter }
+          : {}),
+      }
+      // The write itself is tenant-scoped (id + organizationId), not just the
+      // read: a cross-organization id matches zero rows and reads as missing.
+      let matched
       try {
-        policy = await prisma.slaPolicy.update({
-          where: { id: params.id },
-          data: {
-            ...(input.name !== undefined ? { name: input.name } : {}),
-            ...(input.warningMinutesBefore !== undefined
-              ? { warningMinutesBefore: input.warningMinutesBefore }
-              : {}),
-            ...(input.breachMinutesAfter !== undefined
-              ? { breachMinutesAfter: input.breachMinutesAfter }
-              : {}),
-          },
+        matched = await prisma.slaPolicy.updateMany({
+          where: { id: params.id, organizationId: actor.organizationId },
+          data,
         })
       } catch (error) {
         if (isUniqueViolation(error)) {
@@ -139,6 +141,10 @@ router.patch(
         }
         throw error
       }
+      if (matched.count === 0) {
+        throw notFound('SLA policy not found')
+      }
+      const policy = await scopedPolicy(actor, params.id)
       req.auditEntry = {
         action: 'PATCH /sla-policies/:id',
         resourceType: 'sla_policy',

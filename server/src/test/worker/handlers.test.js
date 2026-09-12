@@ -4,6 +4,8 @@ import { UnrecoverableError } from 'bullmq'
 import { routeQueueJob } from '../../worker/handlers/index.js'
 import { handleJobEvent } from '../../worker/handlers/job-event.js'
 import { handleSlaCheck } from '../../worker/handlers/sla-check.js'
+import { productionDeps } from '../../worker.js'
+import { integrationAdapters } from '../../lib/integration-adapters.js'
 import {
   createOwnerTestClient,
   createOrganizationFixture,
@@ -236,9 +238,11 @@ describe('sla-check handler', () => {
       threshold: 'BREACH',
     })
     expect(await ownerDatabase.escalation.count({ where: { jobId: job.id, threshold: 'BREACH' } })).toBe(1)
-    // The redelivery is already-complete: side effects run once, never twice.
-    expect(hooks.published).toHaveLength(1)
-    expect(hooks.enqueued).toHaveLength(1)
+    // The redelivery is already-complete on the durable row, but the P2002
+    // path re-attempts breach side effects: a retry after a post-commit
+    // fan-out death is how lost side effects converge (at-least-once fan-out).
+    expect(hooks.published).toHaveLength(2)
+    expect(hooks.enqueued).toHaveLength(2)
   })
 
   it.each([['COMPLETED'], ['CANCELLED'], ['FAILED']])(
@@ -320,6 +324,80 @@ describe('sla-check handler', () => {
 
     expect(result).toMatchObject({ status: 'missing-job-noop' })
   })
+
+  it('a foreign organizationId is a missing-job no-op with zero writes', async () => {
+    const { job } = await createJobRow()
+    const hooks = fakeHooks()
+    const payload = slaPayload({
+      jobId: job.id,
+      organizationId: crypto.randomUUID(),
+      threshold: 'BREACH',
+    })
+
+    const result = await handleSlaCheck(payload, await depsWith(hooks))
+
+    expect(result).toMatchObject({ status: 'missing-job-noop', jobId: job.id })
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id } })).toBe(0)
+    const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(reloaded.slaState).toBe('OK')
+    expect(hooks.published).toHaveLength(0)
+    expect(hooks.enqueued).toHaveLength(0)
+  })
+
+  it('a pre-B12 payload without thresholds is an acknowledged no-op', async () => {
+    const { organization, job } = await createJobRow()
+    const legacy = {
+      type: 'sla-check',
+      jobId: job.id,
+      organizationId: organization.id,
+      requestId: `req-legacy-${crypto.randomUUID()}`,
+    }
+
+    const result = await handleSlaCheck(legacy, { prisma: ownerDatabase, log: recordingLogger() })
+
+    expect(result).toMatchObject({ status: 'sla-legacy-noop', jobId: job.id })
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id } })).toBe(0)
+    const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(reloaded.slaState).toBe('OK')
+  })
+
+  it('a breach retry landing on the duplicate path still publishes and enqueues', async () => {
+    const { organization, job } = await createJobRow()
+    const payload = slaPayload({ jobId: job.id, organizationId: organization.id, threshold: 'BREACH' })
+
+    // First delivery commits the escalation row, then dies before side effects.
+    const dyingDeps = {
+      prisma: ownerDatabase,
+      log: recordingLogger(),
+      publishEscalationEvent: async () => {
+        throw new Error('fan-out died post-commit')
+      },
+      enqueueEscalationNotification: async () => {
+        throw new Error('unreached')
+      },
+    }
+    await expect(handleSlaCheck(payload, dyingDeps)).rejects.toThrow('fan-out died post-commit')
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id, threshold: 'BREACH' } })).toBe(1)
+
+    // The retry hits P2002 already-complete: side effects still run, once.
+    const hooks = fakeHooks()
+    const retry = await handleSlaCheck(payload, await depsWith(hooks))
+
+    expect(retry).toMatchObject({ status: 'sla-escalation-complete', jobId: job.id, threshold: 'BREACH' })
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id, threshold: 'BREACH' } })).toBe(1)
+    expect(hooks.published).toHaveLength(1)
+    const row = await ownerDatabase.escalation.findFirstOrThrow({
+      where: { jobId: job.id, threshold: 'BREACH' },
+    })
+    expect(hooks.published[0]).toMatchObject({
+      jobId: job.id,
+      organizationId: organization.id,
+      escalationId: row.id,
+      threshold: 'BREACH',
+    })
+    expect(hooks.enqueued).toHaveLength(1)
+    expect(hooks.enqueued[0]).toMatchObject({ jobId: job.id, organizationId: organization.id })
+  })
 })
 
 describe('handler router', () => {
@@ -346,5 +424,56 @@ describe('handler router', () => {
     )
 
     expect(result).toMatchObject({ status: 'sla-escalated', jobId: job.id })
+  })
+
+  it('routes legacy pre-B12 payloads to an acknowledged no-op instead of poison', async () => {
+    const { organization, job } = await createJobRow()
+    const result = await routeQueueJob(
+      {
+        data: {
+          type: 'sla-check',
+          jobId: job.id,
+          organizationId: organization.id,
+          requestId: `req-legacy-${crypto.randomUUID()}`,
+        },
+      },
+      { prisma: ownerDatabase, log: recordingLogger() },
+    )
+
+    expect(result).toMatchObject({ status: 'sla-legacy-noop', jobId: job.id })
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id } })).toBe(0)
+  })
+
+  it('production deps fan a breach out through both escalation seams', async () => {
+    const { organization, job } = await createJobRow()
+    const published = []
+    const enqueued = []
+    const originalPublish = integrationAdapters.publishEscalationEvent
+    const originalEnqueue = integrationAdapters.enqueueEscalationNotification
+    integrationAdapters.publishEscalationEvent = async (payload) => {
+      published.push(payload)
+    }
+    integrationAdapters.enqueueEscalationNotification = async (payload) => {
+      enqueued.push(payload)
+    }
+    try {
+      const result = await routeQueueJob(
+        { data: slaPayload({ jobId: job.id, organizationId: organization.id, threshold: 'BREACH' }) },
+        productionDeps(ownerDatabase),
+      )
+
+      expect(result).toMatchObject({ status: 'sla-escalated', jobId: job.id, threshold: 'BREACH' })
+      expect(published).toHaveLength(1)
+      expect(published[0]).toMatchObject({
+        jobId: job.id,
+        organizationId: organization.id,
+        threshold: 'BREACH',
+      })
+      expect(enqueued).toHaveLength(1)
+      expect(enqueued[0]).toMatchObject({ jobId: job.id, organizationId: organization.id })
+    } finally {
+      integrationAdapters.publishEscalationEvent = originalPublish
+      integrationAdapters.enqueueEscalationNotification = originalEnqueue
+    }
   })
 })

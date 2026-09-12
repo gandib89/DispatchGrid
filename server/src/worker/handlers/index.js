@@ -2,7 +2,7 @@ import { UnrecoverableError } from 'bullmq'
 import { z } from 'zod'
 import { queueSchemas } from '../../../../shared/queue-schema.js'
 import { handleJobEvent } from './job-event.js'
-import { handleSlaCheck } from './sla-check.js'
+import { handleSlaCheck, isLegacySlaCheck } from './sla-check.js'
 
 const schemas = queueSchemas(z)
 
@@ -20,6 +20,11 @@ export async function routeQueueJob(job, deps) {
   try {
     payload = schemas.queuePayloadSchema.parse(job?.data)
   } catch (error) {
+    // Pre-B12 (B11) delayed timers carry no threshold promise and fail strict
+    // parsing: the sla-check handler acknowledges them instead of poisoning.
+    if (isLegacySlaCheck(job?.data)) {
+      return handleSlaCheck(job.data, deps)
+    }
     throw new UnrecoverableError(`Unprocessable queue payload: ${error.message}`)
   }
 
