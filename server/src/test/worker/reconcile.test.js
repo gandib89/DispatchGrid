@@ -39,6 +39,40 @@ async function commitJobRow() {
   return { organization, job }
 }
 
+async function commitJobWithStatus(status) {
+  const organization = await createOrganizationFixture(ownerDatabase)
+  const user = await createUserFixture(ownerDatabase)
+  const extra = {}
+  if (['ASSIGNED', 'ACCEPTED', 'IN_PROGRESS', 'COMPLETED', 'FAILED'].includes(status)) {
+    extra.currentAssigneeId = user.id
+  }
+  if (status === 'COMPLETED') {
+    extra.completedAt = new Date()
+  }
+  const job = await ownerDatabase.job.create({
+    data: {
+      organizationId: organization.id,
+      reference: `JOB-${crypto.randomUUID().slice(0, 8)}`,
+      title: `Reconcile ${status} fixture`,
+      latitude: 51.5,
+      longitude: -0.12,
+      createdById: user.id,
+      dueAt: new Date(Date.now() + 3_600_000),
+      status,
+      ...extra,
+    },
+  })
+  await ownerDatabase.jobEvent.create({
+    data: {
+      organizationId: organization.id,
+      jobId: job.id,
+      actorUserId: user.id,
+      toStatus: status,
+    },
+  })
+  return { organization, job }
+}
+
 async function queuedJobEventIds() {
   const jobs = await getQueue(QUEUE_NAMES.jobEvents).getJobs(
     ['waiting', 'active', 'delayed', 'paused', 'completed', 'failed'],
@@ -128,6 +162,22 @@ describe('reconciliation failure drill', () => {
 
     expect(result).toMatchObject({ checked: 1, requeued: 0, requeuedJobIds: [] })
     expect((await queuedJobEventIds()).filter((id) => id === job.id)).toHaveLength(1)
+  })
+
+  it('never resurrects terminal jobs: only non-terminal work qualifies for repair', async () => {
+    const completed = await commitJobWithStatus('COMPLETED')
+    const cancelled = await commitJobWithStatus('CANCELLED')
+    const failed = await commitJobWithStatus('FAILED')
+    const { job: active } = await commitJobRow()
+
+    const result = await reconcileJobEvents({ prisma: ownerDatabase })
+
+    expect(result).toMatchObject({ checked: 1, requeued: 1, requeuedJobIds: [active.id] })
+    const queued = await queuedJobEventIds()
+    expect(queued).toContain(active.id)
+    expect(queued).not.toContain(completed.job.id)
+    expect(queued).not.toContain(cancelled.job.id)
+    expect(queued).not.toContain(failed.job.id)
   })
 
   it('reports zero work when nothing is committed', async () => {

@@ -1,7 +1,6 @@
-import { UnrecoverableError } from 'bullmq'
 import { z } from 'zod'
 import { queueSchemas } from '../../../../shared/queue-schema.js'
-import { logger } from '../../lib/logger.js'
+import { consumeJob } from './consume-job.js'
 
 const schemas = queueSchemas(z)
 
@@ -11,28 +10,14 @@ const schemas = queueSchemas(z)
 // unrecoverable: poison must fail loudly without retry, never wedge the
 // consumer re-running backoff loops.
 export async function handleJobEvent(payload, deps = {}) {
-  let data
-  try {
-    data = schemas.jobEventPayloadSchema.parse(payload)
-  } catch (error) {
-    throw new UnrecoverableError(`Unprocessable job-event payload: ${error.message}`)
-  }
-  const log = (deps.log ?? logger).child({
+  return consumeJob(payload, deps, {
     handler: 'job-event',
-    requestId: data.requestId,
-    jobId: data.jobId,
-    organizationId: data.organizationId,
+    schema: schemas.jobEventPayloadSchema,
+    unprocessablePrefix: 'Unprocessable job-event payload',
+    missingLog: 'job-event for unknown job; acknowledging as no-op',
+    found: (job, data, log) => {
+      log.info({ jobStatus: job.status }, 'Consumed job event')
+      return { status: 'consumed', jobId: job.id, requestId: data.requestId }
+    },
   })
-
-  const job = await deps.prisma.job.findFirst({
-    where: { id: data.jobId, organizationId: data.organizationId },
-  })
-
-  if (!job) {
-    log.info('job-event for unknown job; acknowledging as no-op')
-    return { status: 'missing-job-noop', jobId: data.jobId, requestId: data.requestId }
-  }
-
-  log.info({ jobStatus: job.status }, 'Consumed job event')
-  return { status: 'consumed', jobId: job.id, requestId: data.requestId }
 }

@@ -9,10 +9,13 @@ import { logger } from '../lib/logger.js'
 // enqueues inside a transaction.
 //
 // ponytail: O(n) queue scan per run (BullMQ range read + in-memory jobId set);
-// switch to deterministic BullMQ jobIds + getJob when volume matters
-// (B12 already sets the precedent with sla:{jobId}:{thresholdType} keys).
+// switch to deterministic BullMQ jobIds + getJob when volume matters.
+// Threshold vocabulary lands in B12 with the Escalation table.
 const QUEUE_SCAN_TYPES = ['waiting', 'active', 'delayed', 'paused', 'completed', 'failed']
 const QUEUE_SCAN_CAP = 1000
+
+// Terminal states never qualify for repair: finished work must not resurrect.
+const TERMINAL_JOB_STATUSES = Object.freeze(['COMPLETED', 'CANCELLED', 'FAILED'])
 
 export async function reconcileJobEvents({ prisma, limit = 100, log = logger } = {}) {
   if (!prisma) {
@@ -20,6 +23,7 @@ export async function reconcileJobEvents({ prisma, limit = 100, log = logger } =
   }
 
   const jobs = await prisma.job.findMany({
+    where: { status: { notIn: [...TERMINAL_JOB_STATUSES] } },
     orderBy: { updatedAt: 'desc' },
     take: limit,
     select: { id: true, organizationId: true },

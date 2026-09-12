@@ -68,7 +68,8 @@ export async function enqueueJobEvent(payload, options = {}) {
   return job
 }
 
-// After-commit-only: schedule a delayed SLA evaluation (delay via options).
+// After-commit-only: schedule a delayed generic SLA check (delay via options).
+// Threshold vocabulary lands in B12 with the Escalation table.
 export async function scheduleSlaCheck(payload, options = {}) {
   const data = schemas.slaCheckPayloadSchema.parse(payload)
   const queue = getQueue(QUEUE_NAMES.sla)
