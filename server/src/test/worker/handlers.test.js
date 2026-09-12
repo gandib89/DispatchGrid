@@ -29,7 +29,6 @@ function slaPayload(overrides = {}) {
     jobId: crypto.randomUUID(),
     organizationId: crypto.randomUUID(),
     requestId: `req-${crypto.randomUUID()}`,
-    thresholdType: 'warning',
     ...overrides,
   }
 }

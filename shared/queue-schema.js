@@ -10,7 +10,9 @@
 
 export const QUEUE_MESSAGE_TYPES = Object.freeze(['job-event', 'sla-check'])
 
-export const SLA_THRESHOLD_TYPES = Object.freeze(['warning', 'breach'])
+// NOTE (B11): `sla-check` is a generic delayed message type here — queue
+// existence is T1's requirement. Threshold vocabulary (warning/breach) and
+// deterministic keys land in B12 with the Escalation table.
 
 export function queueSchemas(z) {
   const basePayloadSchema = z.object({
@@ -29,7 +31,6 @@ export function queueSchemas(z) {
     .extend({
       type: z.literal('sla-check'),
       jobId: z.string().uuid(),
-      thresholdType: z.enum(SLA_THRESHOLD_TYPES),
     })
     .strict()
 

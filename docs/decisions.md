@@ -48,3 +48,29 @@ This is the stronger production and interview choice per `Dispatch_plan.md`
 - The transactional outbox pattern stays unjustified: a single sweep over
   durable `JobEvent` rows covers the enqueue gap, and no measured loss
   trigger has appeared. Revisit if sweep cost or loss rate says otherwise.
+
+## Scale plan — API scale-to-zero, worker min-instances=1 (story 8)
+
+**Verdict:** the API is stateless and may scale to zero; the worker keeps
+`min-instances=1` so delayed BullMQ work (e.g. generic `sla-check` timers) has
+a consumer when its delay elapses. Source: `Dispatch_plan.md` B11 slice 9
+(`[DECIDED]`). Status: recorded, enforcement lands with C19/B19 deployment.
+
+## Limiter policy under Redis loss
+
+**Verdict:** HTTP rate limiters are process-local (`server/src/lib/rate-limit.js`,
+no Redis store), so they enforce identically with Redis up or down —
+fail-open with respect to Redis: an outage neither loosens nor tightens HTTP
+budgets. During an outage REST keeps its configured budgets while async work
+pauses (post-commit enqueue failure is warned + counted, never rolls back).
+Proven by `server/src/test/queue/dead-letter.test.js` (Redis-out drill). Do
+not add a Redis-backed limiter without revisiting this policy.
+
+## Reconcile framing — B11 sweep vs B12 SLA variant
+
+**Verdict:** the B11 sweep (`reconcileJobEvents`) repairs commit-without-enqueue
+only: recently committed non-terminal jobs with no `job-event` in any BullMQ
+state are re-enqueued through the T1 producer. Terminal jobs
+(`COMPLETED`/`CANCELLED`/`FAILED`) never qualify. The threshold-based SLA
+variant (active jobs past threshold without an `Escalation`) lands with the
+`Escalation` table in B12, as does the `sla-check` threshold vocabulary.
