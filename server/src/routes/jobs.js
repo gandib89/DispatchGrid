@@ -14,6 +14,7 @@ import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
 import { serializeAssignment, serializeEvent, serializeJob } from '../serializers/job-serializer.js'
 import { afterJobCommit as runPostCommitHooks } from '../lib/integration-adapters.js'
+import { recordEnqueueFailure } from '../lib/queue/metrics.js'
 
 // B10-T2/T3/T4 (built): transitions (PATCH, start/complete/cancel/fail),
 // suggestions, timeline/events. They reuse this pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
@@ -70,6 +71,8 @@ export function clearBoardCache() {
 
 // Post-commit seam (T4 no-ops + B11-T2 real enqueue): commit already happened
 // inside the service; a throwing hook must never fail the request or the board.
+// The failure is warned (logged) and counted (metered via queueMetrics); the
+// committed business state stands and reconciliation (T4) repairs the gap.
 async function afterJobCommit(req, actor, job) {
   invalidateBoardCache(actor.organizationId)
   try {
@@ -80,6 +83,7 @@ async function afterJobCommit(req, actor, job) {
       requestId: req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID(),
     })
   } catch (error) {
+    recordEnqueueFailure()
     req.log?.warn?.({ error }, 'Post-commit integration hook failed')
   }
 }
