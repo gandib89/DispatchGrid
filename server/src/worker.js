@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url'
 import { Worker, createNodeRedisClient } from 'bullmq'
 import { prisma } from './db/client.js'
 import { logger } from './lib/logger.js'
-import { QUEUE_NAMES, closeQueues } from './lib/queue/index.js'
+import { QUEUE_NAMES, closeQueues, deadLetterIfExhausted } from './lib/queue/index.js'
 import { createRedisClient } from './lib/redis.js'
 import { routeQueueJob } from './worker/handlers/index.js'
 
@@ -38,6 +38,14 @@ export async function startWorker(options = {}) {
         { queue: name, jobId: job?.id, requestId: job?.data?.requestId, error },
         'Worker job failed',
       )
+      // Exhausted poison lands on the inspectable dead-letter path (B11-T5);
+      // forwarding must never break the worker, so failures only log.
+      deadLetterIfExhausted(name, job, error).catch((deadLetterError) => {
+        logger.error(
+          { queue: name, jobId: job?.id, error: deadLetterError },
+          'Dead-letter forwarding failed',
+        )
+      })
     })
     worker.on('error', (error) => {
       logger.error({ queue: name, error }, 'Worker error')
