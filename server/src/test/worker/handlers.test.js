@@ -150,14 +150,169 @@ describe('job-event handler', () => {
 })
 
 describe('sla-check handler', () => {
-  it('re-reads PostgreSQL and finishes as a foundation no-op', async () => {
+  function fakeHooks() {
+    const published = []
+    const enqueued = []
+    return {
+      published,
+      enqueued,
+      publishEscalationEvent: async (payload) => {
+        published.push(payload)
+      },
+      enqueueEscalationNotification: async (payload) => {
+        enqueued.push(payload)
+      },
+    }
+  }
+
+  function payloadFor(job, organization, threshold, hooks, overrides = {}) {
+    return slaPayload({
+      jobId: job.id,
+      organizationId: organization.id,
+      threshold,
+      ...overrides,
+    })
+  }
+
+  async function depsWith(hooks) {
+    return { prisma: ownerDatabase, log: recordingLogger(), ...hooks }
+  }
+
+  it('warning delivery sets WARNING and records one escalation with no HTTP', async () => {
     const { organization, job } = await createJobRow()
-    const log = recordingLogger()
-    const payload = slaPayload({ jobId: job.id, organizationId: organization.id })
+    const hooks = fakeHooks()
+    const payload = payloadFor(job, organization, 'WARNING', hooks)
 
-    const result = await handleSlaCheck(payload, { prisma: ownerDatabase, log })
+    const result = await handleSlaCheck(payload, await depsWith(hooks))
 
-    expect(result).toMatchObject({ status: 'sla-check-noop', jobId: job.id })
+    expect(result).toMatchObject({ status: 'sla-escalated', jobId: job.id, threshold: 'WARNING', slaState: 'WARNING' })
+    const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(reloaded.slaState).toBe('WARNING')
+    const rows = await ownerDatabase.escalation.findMany({ where: { jobId: job.id } })
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ threshold: 'WARNING', organizationId: organization.id })
+    // Warning alone fans out nothing: notification + publish are breach-only.
+    expect(hooks.published).toHaveLength(0)
+    expect(hooks.enqueued).toHaveLength(0)
+  })
+
+  it('breach delivery sets BREACHED, records one escalation, then enqueues and publishes', async () => {
+    const { organization, job } = await createJobRow()
+    const hooks = fakeHooks()
+    const payload = payloadFor(job, organization, 'BREACH', hooks)
+
+    const result = await handleSlaCheck(payload, await depsWith(hooks))
+
+    expect(result).toMatchObject({ status: 'sla-escalated', jobId: job.id, threshold: 'BREACH', slaState: 'BREACHED' })
+    const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(reloaded.slaState).toBe('BREACHED')
+    const rows = await ownerDatabase.escalation.findMany({ where: { jobId: job.id } })
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ threshold: 'BREACH' })
+    expect(hooks.published).toHaveLength(1)
+    expect(hooks.published[0]).toMatchObject({
+      jobId: job.id,
+      organizationId: organization.id,
+      escalationId: rows[0].id,
+      threshold: 'BREACH',
+    })
+    expect(hooks.enqueued).toHaveLength(1)
+    expect(hooks.enqueued[0]).toMatchObject({ jobId: job.id, organizationId: organization.id })
+  })
+
+  it('duplicate deliveries of the same threshold create exactly one row and acknowledge as complete', async () => {
+    const { organization, job } = await createJobRow()
+    const hooks = fakeHooks()
+    const payload = payloadFor(job, organization, 'BREACH', hooks)
+    const deps = await depsWith(hooks)
+
+    const first = await handleSlaCheck(payload, deps)
+    const second = await handleSlaCheck(payload, deps)
+
+    expect(first.status).toBe('sla-escalated')
+    expect(second).toMatchObject({
+      status: 'sla-escalation-complete',
+      jobId: job.id,
+      threshold: 'BREACH',
+    })
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id, threshold: 'BREACH' } })).toBe(1)
+    // The redelivery is already-complete: side effects run once, never twice.
+    expect(hooks.published).toHaveLength(1)
+    expect(hooks.enqueued).toHaveLength(1)
+  })
+
+  it.each([['COMPLETED'], ['CANCELLED'], ['FAILED']])(
+    'terminal %s jobs are a safe no-op with no write and no side effects',
+    async (status) => {
+      const organization = await createOrganizationFixture(ownerDatabase)
+      const user = await createUserFixture(ownerDatabase)
+      const job = await ownerDatabase.job.create({
+        data: {
+          organizationId: organization.id,
+          reference: `JOB-${crypto.randomUUID().slice(0, 8)}`,
+          title: 'Handler fixture',
+          latitude: 51.5,
+          longitude: -0.12,
+          createdById: user.id,
+          dueAt: new Date(Date.now() + 3_600_000),
+          status,
+          // COMPLETED/FAILED rows must carry an assignee per the status check.
+          ...(['COMPLETED', 'FAILED'].includes(status) ? { currentAssigneeId: user.id } : {}),
+          ...(status === 'COMPLETED' ? { completedAt: new Date() } : {}),
+        },
+      })
+      const hooks = fakeHooks()
+
+      const result = await handleSlaCheck(
+        payloadFor(job, organization, 'BREACH', hooks),
+        await depsWith(hooks),
+      )
+
+      expect(result).toMatchObject({ status: 'sla-terminal-noop', jobId: job.id })
+      expect(await ownerDatabase.escalation.count({ where: { jobId: job.id } })).toBe(0)
+      const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+      expect(reloaded.slaState).toBe('OK')
+      expect(hooks.published).toHaveLength(0)
+      expect(hooks.enqueued).toHaveLength(0)
+    },
+  )
+
+  it('a breach without a prior warning still converges the job to BREACHED', async () => {
+    const { organization, job } = await createJobRow()
+    const hooks = fakeHooks()
+
+    await handleSlaCheck(payloadFor(job, organization, 'BREACH', hooks), await depsWith(hooks))
+
+    const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(reloaded.slaState).toBe('BREACHED')
+  })
+
+  it('warning after breach keeps BREACHED but still records the warning row', async () => {
+    const { organization, job } = await createJobRow()
+    const hooks = fakeHooks()
+    const deps = await depsWith(hooks)
+
+    await handleSlaCheck(payloadFor(job, organization, 'BREACH', hooks), deps)
+    const result = await handleSlaCheck(payloadFor(job, organization, 'WARNING', hooks), deps)
+
+    expect(result).toMatchObject({ status: 'sla-escalated', threshold: 'WARNING', slaState: 'BREACHED' })
+    const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+    expect(reloaded.slaState).toBe('BREACHED')
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id } })).toBe(2)
+  })
+
+  it('a genuine transaction failure throws for redelivery instead of acknowledging', async () => {
+    const { organization, job } = await createJobRow()
+    const failingPrisma = {
+      job: { findFirst: () => ownerDatabase.job.findFirst({ where: { id: job.id } }) },
+      $transaction: () => Promise.reject(new Error('connection reset')),
+    }
+    const payload = slaPayload({ jobId: job.id, organizationId: organization.id, threshold: 'WARNING' })
+
+    await expect(handleSlaCheck(payload, { prisma: failingPrisma, log: recordingLogger() })).rejects.toThrow(
+      'connection reset',
+    )
+    expect(await ownerDatabase.escalation.count({ where: { jobId: job.id } })).toBe(0)
   })
 
   it('tolerates a missing job as a safe no-op', async () => {
@@ -182,9 +337,14 @@ describe('handler router', () => {
     const { organization, job } = await createJobRow()
     const result = await routeQueueJob(
       { data: slaPayload({ jobId: job.id, organizationId: organization.id }) },
-      { prisma: ownerDatabase, log: recordingLogger() },
+      {
+        prisma: ownerDatabase,
+        log: recordingLogger(),
+        publishEscalationEvent: async () => {},
+        enqueueEscalationNotification: async () => {},
+      },
     )
 
-    expect(result).toMatchObject({ status: 'sla-check-noop', jobId: job.id })
+    expect(result).toMatchObject({ status: 'sla-escalated', jobId: job.id })
   })
 })
