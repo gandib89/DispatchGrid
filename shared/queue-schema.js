@@ -10,9 +10,10 @@
 
 export const QUEUE_MESSAGE_TYPES = Object.freeze(['job-event', 'sla-check'])
 
-// NOTE (B11): `sla-check` is a generic delayed message type here — queue
-// existence is T1's requirement. Threshold vocabulary (warning/breach) and
-// deterministic keys land in B12 with the Escalation table.
+// Threshold vocabulary for delayed evaluation (B12): WARNING fires before the
+// deadline, BREACH at/after it. Mirrors the Escalation threshold enum so the
+// handler can distinguish urgency from the payload, not the queue name.
+export const SLA_THRESHOLDS = Object.freeze(['WARNING', 'BREACH'])
 
 export function queueSchemas(z) {
   const basePayloadSchema = z.object({
@@ -27,10 +28,20 @@ export function queueSchemas(z) {
     })
     .strict()
 
+  // Delayed evaluation request (B12-T3): the threshold travels in the payload
+  // alongside a frozen copy of the promise made at assignment time —
+  // slaPolicyId names the promising policy while warningMinutesBefore,
+  // breachMinutesAfter, and dueAt carry its exact values, so later policy
+  // edits (A-6) can never shift already-scheduled evaluations.
   const slaCheckPayloadSchema = basePayloadSchema
     .extend({
       type: z.literal('sla-check'),
       jobId: z.string().uuid(),
+      threshold: z.enum(SLA_THRESHOLDS),
+      slaPolicyId: z.string().uuid(),
+      warningMinutesBefore: z.number().int().min(0),
+      breachMinutesAfter: z.number().int().min(0),
+      dueAt: z.string().datetime(),
     })
     .strict()
 
