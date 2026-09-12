@@ -119,14 +119,22 @@ describe('delayed sla-check seam', () => {
       const delayed = await getQueue(QUEUE_NAMES.sla).getDelayed()
       expect(delayed.map((entry) => entry.id)).toContain(enqueued.id)
 
-      // The worker consumes it after the delay.
+      // The worker consumes it after the delay: time alone moves the SLA
+      // state with zero HTTP requests after scheduling.
       const stored = await getQueue(QUEUE_NAMES.sla).getJob(enqueued.id)
       const returnvalue = await stored.waitUntilFinished(queueEvents, 15_000)
       expect(returnvalue).toMatchObject({
-        status: 'sla-check-noop',
+        status: 'sla-escalated',
         jobId: job.id,
         requestId: payload.requestId,
+        threshold: 'WARNING',
+        slaState: 'WARNING',
       })
+      const reloaded = await ownerDatabase.job.findUniqueOrThrow({ where: { id: job.id } })
+      expect(reloaded.slaState).toBe('WARNING')
+      await expect(
+        ownerDatabase.escalation.count({ where: { jobId: job.id, threshold: 'WARNING' } }),
+      ).resolves.toBe(1)
       const finished = await getQueue(QUEUE_NAMES.sla).getJob(enqueued.id)
       expect(finished.finishedOn - finished.timestamp).toBeGreaterThanOrEqual(800)
     } finally {
