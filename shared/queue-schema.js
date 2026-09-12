@@ -8,7 +8,19 @@
 // whole ORM records: every payload carries IDs, the organization ID, a type,
 // and the originating request ID so async work traces back to its HTTP cause.
 
-export const QUEUE_MESSAGE_TYPES = Object.freeze(['job-event', 'sla-check'])
+export const QUEUE_MESSAGE_TYPES = Object.freeze(['job-event', 'sla-check', 'notification'])
+
+// Delivery vocabulary for retryable communication (B13): assignment notices,
+// generic job updates, completion notices, and SLA threshold notices. Mirrors
+// the NotificationType enum so the handler can distinguish urgency from the
+// payload, not the queue name.
+export const NOTIFICATION_TYPES = Object.freeze([
+  'JOB_ASSIGNED',
+  'JOB_UPDATED',
+  'JOB_COMPLETED',
+  'SLA_WARNING',
+  'SLA_BREACH',
+])
 
 // Threshold vocabulary for delayed evaluation (B12): WARNING fires before the
 // deadline, BREACH at/after it. Mirrors the Escalation threshold enum so the
@@ -46,14 +58,29 @@ export function queueSchemas(z) {
     })
     .strict()
 
+  // Retryable delivery request (B13): the notification type travels in the
+  // payload alongside the recipient, so routing stays outside the Jobs and
+  // SLA modules. escalationId is optional correlation for threshold notices.
+  const notificationPayloadSchema = basePayloadSchema
+    .extend({
+      type: z.literal('notification'),
+      jobId: z.string().uuid(),
+      notificationType: z.enum(NOTIFICATION_TYPES),
+      recipientId: z.string().uuid(),
+      escalationId: z.string().uuid().optional(),
+    })
+    .strict()
+
   const queuePayloadSchema = z.discriminatedUnion('type', [
     jobEventPayloadSchema,
     slaCheckPayloadSchema,
+    notificationPayloadSchema,
   ])
 
   return {
     jobEventPayloadSchema,
     slaCheckPayloadSchema,
+    notificationPayloadSchema,
     queuePayloadSchema,
   }
 }

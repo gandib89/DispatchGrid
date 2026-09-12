@@ -10,7 +10,7 @@ import {
   deadLetterIfExhausted,
 } from './lib/queue/index.js'
 import { routeQueueJob } from './worker/handlers/index.js'
-import { reconcileJobEvents } from './worker/reconcile.js'
+import { reconcileJobEvents, reconcileNotifications } from './worker/reconcile.js'
 
 // Second entrypoint (B11-T2): consumes the T1 queues through a validating
 // handler router. Logging, database, Redis, handler registration — no HTTP
@@ -50,7 +50,7 @@ export async function startWorker(options = {}) {
   const rawClients = []
   const workers = []
 
-  for (const name of [QUEUE_NAMES.jobEvents, QUEUE_NAMES.sla]) {
+  for (const name of [QUEUE_NAMES.jobEvents, QUEUE_NAMES.sla, QUEUE_NAMES.notifications]) {
     const { raw, connection } = createWorkerConnection()
     rawClients.push(raw)
     const worker = new Worker(name, processor, { ...workerOptions, connection })
@@ -91,6 +91,7 @@ export async function startWorker(options = {}) {
       sweepRunning = true
       try {
         await reconcileJobEvents({ prisma: database })
+        await reconcileNotifications({ prisma: database })
       } catch (error) {
         logger.error({ error }, 'Reconciliation sweep failed')
       } finally {

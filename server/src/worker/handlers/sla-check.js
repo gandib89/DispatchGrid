@@ -77,7 +77,13 @@ export async function handleSlaCheck(payload, deps = {}) {
           threshold: data.threshold,
           requestId: data.requestId,
         })
-        await enqueue({ jobId: job.id, organizationId: job.organizationId, jobVersion: job.version, requestId: data.requestId })
+        await enqueue({
+          jobId: job.id,
+          organizationId: job.organizationId,
+          requestId: data.requestId,
+          threshold: data.threshold,
+          escalationId,
+        })
       }
 
       let escalation

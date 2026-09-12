@@ -6,6 +6,7 @@ import { prisma } from '../db/client.js'
 import { logger } from './logger.js'
 import {
   enqueueJobEvent,
+  enqueueNotification,
   removePendingSlaEvaluations,
   scheduleSlaCheck,
   slaDelayMs,
@@ -35,8 +36,31 @@ export const integrationAdapters = {
       requestId: payload.requestId,
     })
   },
+  // Escalation delivery (B13): a committed escalation becomes one retryable
+  // delivery request for the agent holding the job (or its creator while
+  // unassigned), typed by threshold. After-commit-only — plain reads, no
+  // transaction. A vanished row needs no delivery.
   async enqueueEscalationNotification(payload) {
-    await integrationAdapters.enqueueJobWork(payload)
+    const job = await prisma.job.findFirst({
+      where: { id: payload.jobId, organizationId: payload.organizationId },
+      select: { id: true, currentAssigneeId: true, createdById: true },
+    })
+    if (!job) {
+      logger.info(
+        { jobId: payload.jobId, organizationId: payload.organizationId, requestId: payload.requestId },
+        'Escalation job vanished before notification enqueue; skipping delivery',
+      )
+      return
+    }
+    await enqueueNotification({
+      type: 'notification',
+      jobId: job.id,
+      organizationId: payload.organizationId,
+      requestId: payload.requestId,
+      notificationType: payload.threshold === 'WARNING' ? 'SLA_WARNING' : 'SLA_BREACH',
+      recipientId: job.currentAssigneeId ?? job.createdById,
+      ...(payload.escalationId ? { escalationId: payload.escalationId } : {}),
+    })
   },
 }
 

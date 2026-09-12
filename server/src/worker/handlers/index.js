@@ -3,12 +3,14 @@ import { z } from 'zod'
 import { queueSchemas } from '../../../../shared/queue-schema.js'
 import { handleJobEvent } from './job-event.js'
 import { handleSlaCheck, isLegacySlaCheck } from './sla-check.js'
+import { handleNotification } from './notifications.js'
 
 const schemas = queueSchemas(z)
 
 export const queueHandlers = Object.freeze({
   'job-event': handleJobEvent,
   'sla-check': handleSlaCheck,
+  notification: handleNotification,
 })
 
 // Handler router: validate every payload at entry, dispatch by type.
