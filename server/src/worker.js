@@ -1,19 +1,96 @@
-import { createRedisClient } from './lib/redis.js'
+import { pathToFileURL } from 'node:url'
+import { Worker, createNodeRedisClient } from 'bullmq'
+import { prisma } from './db/client.js'
 import { logger } from './lib/logger.js'
+import { QUEUE_NAMES, closeQueues } from './lib/queue/index.js'
+import { createRedisClient } from './lib/redis.js'
+import { routeQueueJob } from './worker/handlers/index.js'
 
-const redis = createRedisClient()
-let shuttingDown = false
+// Second entrypoint (B11-T2): consumes the T1 queues through a validating
+// handler router. Logging, database, Redis, handler registration — no HTTP
+// listener. Importing this module boots nothing; run it (`node src/worker.js`)
+// or call startWorker (tests) to register consumers.
+//
+// Raw node-redis clients are wrapped with createNodeRedisClient: BullMQ builds
+// the worker's blocking connection by duplicating the passed connection, and a
+// raw duplicate never connects, so an unwrapped client hangs waitUntilReady.
+let runtime = null
 
-await redis.connect()
-logger.info('DispatchGrid worker foundation connected to Redis')
+export async function startWorker(options = {}) {
+  if (runtime) {
+    throw new Error('Worker already started')
+  }
 
-async function shutdown(signal) {
-  if (shuttingDown) return
-  shuttingDown = true
+  const {
+    prisma: database = prisma,
+    processor = (job) => routeQueueJob(job, { prisma: database, log: logger }),
+  } = options
 
-  logger.info({ signal }, 'Worker shutdown started')
-  await redis.quit()
+  const rawClients = []
+  const workers = []
+
+  for (const name of [QUEUE_NAMES.jobEvents, QUEUE_NAMES.sla]) {
+    const raw = createRedisClient()
+    rawClients.push(raw)
+    const worker = new Worker(name, processor, { connection: createNodeRedisClient(raw) })
+    worker.on('failed', (job, error) => {
+      logger.error(
+        { queue: name, jobId: job?.id, requestId: job?.data?.requestId, error },
+        'Worker job failed',
+      )
+    })
+    worker.on('error', (error) => {
+      logger.error({ queue: name, error }, 'Worker error')
+    })
+    workers.push(worker)
+  }
+
+  for (const worker of workers) {
+    await worker.waitUntilReady()
+  }
+
+  logger.info(
+    { queues: workers.map((worker) => worker.name) },
+    'DispatchGrid worker started',
+  )
+
+  runtime = { workers, rawClients, database }
+  return runtime
 }
 
-process.once('SIGINT', () => void shutdown('SIGINT'))
-process.once('SIGTERM', () => void shutdown('SIGTERM'))
+export async function stopWorker(signal = 'SIGTERM') {
+  if (!runtime) return
+
+  const { workers, rawClients, database } = runtime
+  runtime = null
+
+  logger.info({ signal }, 'Worker shutdown started')
+
+  // Drain, not abandon: stop fetching, finish the current job, then close.
+  for (const worker of workers) {
+    await worker.close()
+  }
+  await closeQueues()
+  for (const raw of rawClients) {
+    if (raw.isOpen) {
+      await raw.quit().catch(() => {})
+    }
+  }
+  await database.$disconnect()
+
+  logger.info({ signal }, 'Worker shutdown complete')
+}
+
+process.once('SIGINT', () => void stopWorker('SIGINT'))
+process.once('SIGTERM', () => void stopWorker('SIGTERM'))
+
+const invokedAsMain =
+  typeof process.argv[1] === 'string' &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+
+if (invokedAsMain) {
+  startWorker().catch((error) => {
+    logger.error({ error }, 'Worker failed to start')
+    process.exitCode = 1
+  })
+}

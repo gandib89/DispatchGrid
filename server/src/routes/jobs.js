@@ -1,10 +1,12 @@
 import { Router } from 'express'
 import { z } from 'zod'
+import crypto from 'node:crypto'
 import { prisma } from '../db/client.js'
 import { authenticate } from '../middleware/authenticate.js'
 import { actorFrom, authorize } from '../middleware/authorize.js'
 import { resolveTenant } from '../middleware/resolve-tenant.js'
 import { auditLog } from '../middleware/audit-log.js'
+import { getRequestContext } from '../lib/request-context.js'
 import { jobSchemas } from '../../../shared/job-schema.js'
 import { cancelJob, completeJob, createJob, failJob, patchJob, startJob } from '../services/job-service.js'
 import { acceptJob, assignJob, declineJob } from '../services/assignment-service.js'
@@ -66,8 +68,8 @@ export function clearBoardCache() {
   boardCache.clear()
 }
 
-// Post-commit seam (T4 no-ops): commit already happened inside the service;
-// a throwing hook must never fail the request or the board.
+// Post-commit seam (T4 no-ops + B11-T2 real enqueue): commit already happened
+// inside the service; a throwing hook must never fail the request or the board.
 async function afterJobCommit(req, actor, job) {
   invalidateBoardCache(actor.organizationId)
   try {
@@ -75,6 +77,7 @@ async function afterJobCommit(req, actor, job) {
       jobId: job.id,
       organizationId: actor.organizationId,
       status: job.status,
+      requestId: req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID(),
     })
   } catch (error) {
     req.log?.warn?.({ error }, 'Post-commit integration hook failed')
