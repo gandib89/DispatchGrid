@@ -1,3 +1,4 @@
+import { UnrecoverableError } from 'bullmq'
 import { z } from 'zod'
 import { queueSchemas } from '../../../../shared/queue-schema.js'
 import { logger } from '../../lib/logger.js'
@@ -6,9 +7,16 @@ const schemas = queueSchemas(z)
 
 // At-least-once consumer: parse the payload at entry, re-read PostgreSQL
 // (payload is a request, not truth), tolerate zero/one/many deliveries,
-// return on success or throw for retry.
+// return on success or throw for retry. Validation failures are
+// unrecoverable: poison must fail loudly without retry, never wedge the
+// consumer re-running backoff loops.
 export async function handleJobEvent(payload, deps = {}) {
-  const data = schemas.jobEventPayloadSchema.parse(payload)
+  let data
+  try {
+    data = schemas.jobEventPayloadSchema.parse(payload)
+  } catch (error) {
+    throw new UnrecoverableError(`Unprocessable job-event payload: ${error.message}`)
+  }
   const log = (deps.log ?? logger).child({
     handler: 'job-event',
     requestId: data.requestId,

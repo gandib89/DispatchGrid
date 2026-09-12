@@ -1,6 +1,5 @@
 import crypto from 'node:crypto'
 import { afterAll, beforeEach, describe, expect, it } from 'vitest'
-import { ZodError } from 'zod'
 import { UnrecoverableError } from 'bullmq'
 import { routeQueueJob } from '../../worker/handlers/index.js'
 import { handleJobEvent } from '../../worker/handlers/job-event.js'
@@ -89,13 +88,13 @@ describe('handler entry validation', () => {
   it('rejects a malformed job-event before any database code runs', async () => {
     await expect(
       handleJobEvent({ ...jobEventPayload(), requestId: undefined }, { prisma: explodingDatabase() }),
-    ).rejects.toBeInstanceOf(ZodError)
+    ).rejects.toBeInstanceOf(UnrecoverableError)
   })
 
   it('rejects a malformed sla-check before any database code runs', async () => {
     await expect(
       handleSlaCheck({ ...slaPayload(), jobId: 'not-a-uuid' }, { prisma: explodingDatabase() }),
-    ).rejects.toBeInstanceOf(ZodError)
+    ).rejects.toBeInstanceOf(UnrecoverableError)
   })
 
   it('rejects unknown payload types at the router before any database code runs', async () => {
