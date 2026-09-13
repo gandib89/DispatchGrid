@@ -23,9 +23,15 @@ export function pingSchemas(z) {
 
   const pingQuerySchema = z.object({}).strict()
 
+  // B14-T4 (#41): single-agent latest-position read. The agent identity is a
+  // membership id validated same-org at the route (unknown or cross-org ids
+  // read as 404, never 403 — the B04 rule).
+  const agentPositionParamsSchema = z.object({ agentId: z.string().uuid() }).strict()
+
   return {
     createPingSchema,
     pingParamsSchema,
     pingQuerySchema,
+    agentPositionParamsSchema,
   }
 }

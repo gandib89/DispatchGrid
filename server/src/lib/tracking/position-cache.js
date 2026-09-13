@@ -87,6 +87,10 @@ export async function writePosition(input, options = {}) {
       longitude: input.longitude,
       accuracy: input.accuracy,
       recordedAt: input.recordedAt,
+      // B14-T4 (#41): nullable job linkage per A-8 rides the hot value so
+      // dispatcher reads see it without a per-hit database lookup. Entries
+      // written before this field existed read back without it (null).
+      jobId: input.jobId ?? null,
       organizationId,
       agentId,
     }
