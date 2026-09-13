@@ -98,7 +98,7 @@ const KNOWN_AUTH_ERRORS = new Set([
 ])
 
 let io = null
-let adapterClients = null
+const attached = []
 
 export function getSocketServer() {
   return io
@@ -106,10 +106,13 @@ export function getSocketServer() {
 
 // Attach to a real HTTP server (node:http createServer). enableAdapter:false
 // skips the Redis adapter for adapter-less unit use; production always adapts.
+//
+// Production attaches exactly once (index.js). The T3 two-instance test
+// attaches twice (A then B) to model two API instances sharing one Redis:
+// every attach is tracked for close, and publishToOrg emits via the most
+// recently attached server — so a write handled by B emits from B and reaches
+// a socket on A only through the Redis adapter.
 export async function attachSocketServer(httpServer, { enableAdapter = true } = {}) {
-  if (io) {
-    throw new Error('Socket server already attached')
-  }
 
   const server = new Server(httpServer, {
     cors: { origin: env.CLIENT_ORIGIN, credentials: true },
@@ -159,21 +162,24 @@ export async function attachSocketServer(httpServer, { enableAdapter = true } = 
     socket.join(orgRoom(socket.data.actor.organizationId))
   })
 
+  let clients = null
   if (enableAdapter) {
     const pubClient = createRedisClient()
     await pubClient.connect()
     const subClient = pubClient.duplicate()
     await subClient.connect()
     server.adapter(createAdapter(pubClient, subClient))
-    adapterClients = { pubClient, subClient }
+    clients = { pubClient, subClient }
   }
 
+  attached.push({ server, clients })
   io = server
   return server
 }
 
 // Fire-and-forget org publish for T2 routes/adapters: emits to the derived
-// room on this instance; the Redis adapter fans out to every instance.
+// room on this instance (the newest attach when several are attached); the
+// Redis adapter fans out to every instance.
 // Returns true when emitted, false when skipped (no server attached or emit
 // failed). Never throws — callers meter a false return and keep the request
 // 2xx (PostgreSQL stays the correctness path).
@@ -192,19 +198,17 @@ export function publishToOrg(organizationId, event, payload) {
   }
 }
 
-// Test/shutdown helper mirroring closeQueues/closePositionCache: closes the
-// server, then its dedicated adapter pair. Idempotent.
+// Test/shutdown helper mirroring closeQueues/closePositionCache: closes every
+// attached server, then each dedicated adapter pair. Idempotent.
 export async function closeSocketServer() {
-  const current = io
+  const servers = attached.splice(0)
   io = null
-  const clients = adapterClients
-  adapterClients = null
 
-  if (current) {
-    await current.close()
-  }
-  if (clients) {
-    await clients.subClient.quit().catch(() => {})
-    await clients.pubClient.quit().catch(() => {})
+  for (const { server, clients } of servers) {
+    await server.close()
+    if (clients) {
+      await clients.subClient.quit().catch(() => {})
+      await clients.pubClient.quit().catch(() => {})
+    }
   }
 }

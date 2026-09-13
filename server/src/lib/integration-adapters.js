@@ -33,8 +33,11 @@ export const integrationAdapters = {
   // fixed escalated payload (job, threshold, SLA state, read fresh
   // post-commit) to the org room. Fire-and-forget: a parked or failed
   // publish is warned and metered, never thrown — PostgreSQL stays the
-  // correctness path. (A worker process with no attached socket server
-  // parks the publish the same way; cross-process fan-out rides T3.)
+  // correctness path. WORKER GAP (B15-T3 #46, decided): a worker process has
+  // no attached socket server, so worker-side escalation parks here instead
+  // of fanning out; T3 proves API-instance fan-out for in-process publishes
+  // only. A send-only Redis bridge was deferred — no new emitter dependency,
+  // no socket tier in B15.
   async publishEscalationEvent(payload) {
     try {
       const job = await prisma.job.findUnique({ where: { id: payload.jobId } })
