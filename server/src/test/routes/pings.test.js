@@ -346,6 +346,14 @@ describe('POST /api/v1/pings', () => {
     const peerToken = await createPeerAgent()
     const peerResponse = await postPing(peerToken)
     expect(peerResponse.status).toBe(201)
+
+    // Key proof: both agents posted from the same supertest client IP in the
+    // same org, yet only the noisy one is throttled — so the limiter key is
+    // agent identity (membershipId per rate-limit.js), never IP or tenant.
+    const peerPing = await ownerDatabase.locationPing.findFirstOrThrow({
+      where: { id: peerResponse.body.ping.id },
+    })
+    expect(peerPing.organizationId).toBe((await membershipFor(agentEmail)).organizationId)
   }, 60_000)
 })
 
