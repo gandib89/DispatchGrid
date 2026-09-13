@@ -65,6 +65,7 @@ model Organization {
   jobEvents               JobEvent[]
   slaPolicies             SlaPolicy[]
   escalations             Escalation[]
+  locationPings           LocationPing[]
 
   @@index([createdAt])
 }
@@ -227,6 +228,7 @@ model Job {
   assignments       Assignment[]
   events            JobEvent[]
   escalations       Escalation[]
+  locationPings     LocationPing[]
 
   @@unique([organizationId, reference])
   @@index([organizationId, status, priority, dueAt])
@@ -289,4 +291,21 @@ model Escalation {
 
   @@unique([jobId, threshold])
   @@index([organizationId, jobId, createdAt])
+}
+
+model LocationPing {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  agentId        String       @db.Uuid
+  jobId          String?      @db.Uuid
+  latitude       Decimal      @db.Decimal(9, 6)
+  longitude      Decimal      @db.Decimal(9, 6)
+  accuracy       Float
+  recordedAt     DateTime     @db.Timestamptz(6)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  job            Job?         @relation(fields: [jobId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, agentId, recordedAt])
+  @@index([organizationId, recordedAt])
 }
