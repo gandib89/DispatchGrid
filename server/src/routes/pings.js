@@ -22,6 +22,10 @@ import { serializePing, serializePosition } from '../serializers/ping-serializer
 const router = Router()
 const schemas = pingSchemas(z)
 
+// Board-list precedent (jobs.js pageSize max): the fleet read is capped, not
+// paginated — one latest dot per agent, at most 100 agents per response.
+export const LATEST_POSITIONS_LIMIT = 100
+
 router.post(
   '/',
   authenticate,
@@ -115,20 +119,21 @@ router.get(
     try {
       schemas.pingQuerySchema.parse(req.query)
       const actor = actorFrom(req)
-      // Durable agent ids cover every hot key: the cache is only written
-      // after the durable insert, and prune (T5) only removes rows far older
-      // than the 5-minute TTL — so a hot dot always has a durable sibling.
+      // Capped agent set (board-list 100 precedent) resolved concurrently:
+      // the cache is only written after the durable insert, and prune (T5)
+      // only removes rows far older than the 5-minute TTL — so a hot dot
+      // always has a durable sibling.
       const groups = await prisma.locationPing.groupBy({
         by: ['agentId'],
         where: { organizationId: actor.organizationId },
+        orderBy: { agentId: 'asc' },
+        take: LATEST_POSITIONS_LIMIT,
       })
-      const positions = []
-      for (const group of groups) {
-        const position = await resolveLatestPosition(actor.organizationId, group.agentId)
-        if (position) {
-          positions.push(position)
-        }
-      }
+      const positions = (
+        await Promise.all(
+          groups.map((group) => resolveLatestPosition(actor.organizationId, group.agentId)),
+        )
+      ).filter(Boolean)
       res.status(200).json({ positions })
     } catch (error) {
       next(error)
