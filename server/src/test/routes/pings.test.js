@@ -348,3 +348,173 @@ describe('POST /api/v1/pings', () => {
     expect(peerResponse.status).toBe(201)
   }, 60_000)
 })
+
+function getLatest(token, agentId) {
+  return request(app)
+    .get(`/api/v1/pings/latest/${agentId}`)
+    .set('Authorization', `Bearer ${token}`)
+}
+
+function getLatestList(token) {
+  return request(app).get('/api/v1/pings/latest').set('Authorization', `Bearer ${token}`)
+}
+
+// B14-T4 (#41) route seam: Redis-first dispatcher reads with durable
+// fallback in the same envelope, org-scoped 404s, and a dispatcher/admin
+// only role matrix (agents cannot enumerate peers — not even themselves).
+describe('GET /api/v1/pings/latest', () => {
+  it('serves the hot value on a hit with the full position envelope', async () => {
+    const agentToken = await tokenFor(agentEmail)
+    const membership = await membershipFor(agentEmail)
+    const job = await createJobIn('dispatchgrid-demo', adminEmail)
+    const posted = await postPing(agentToken, pingPayload({ jobId: job.id }))
+    expect(posted.status).toBe(201)
+
+    const response = await getLatest(await tokenFor(dispatcherEmail), membership.id)
+    expect(response.status).toBe(200)
+    expect(response.body.position).toMatchObject({
+      organizationId: membership.organizationId,
+      agentId: membership.id,
+      jobId: job.id,
+      latitude: 51.5,
+      longitude: -0.12,
+      accuracy: 5.5,
+      recordedAt: posted.body.ping.recordedAt,
+      source: 'cache',
+    })
+  })
+
+  it('falls back to the newest durable row on a forced miss in the same shape', async () => {
+    const agentToken = await tokenFor(agentEmail)
+    const membership = await membershipFor(agentEmail)
+    const job = await createJobIn('dispatchgrid-demo', adminEmail)
+    const payload = pingPayload({ jobId: job.id })
+    expect((await postPing(agentToken, payload)).status).toBe(201)
+
+    const dispatcherToken = await tokenFor(dispatcherEmail)
+    const hit = await getLatest(dispatcherToken, membership.id)
+    expect(hit.status).toBe(200)
+    expect(hit.body.position.source).toBe('cache')
+
+    await redis.del(positionCacheKey(membership.organizationId, membership.id))
+
+    const fallback = await getLatest(dispatcherToken, membership.id)
+    expect(fallback.status).toBe(200)
+    expect(fallback.body.position.source).toBe('database')
+    const hitFields = { ...hit.body.position }
+    const fallbackFields = { ...fallback.body.position }
+    delete hitFields.source
+    delete fallbackFields.source
+    expect(fallbackFields).toEqual(hitFields)
+  })
+
+  it('exposes a null job linkage per A-8 on both sources', async () => {
+    const agentToken = await tokenFor(agentEmail)
+    const membership = await membershipFor(agentEmail)
+    expect((await postPing(agentToken, pingPayload())).status).toBe(201)
+
+    const dispatcherToken = await tokenFor(dispatcherEmail)
+    expect((await getLatest(dispatcherToken, membership.id)).body.position.jobId).toBeNull()
+
+    await redis.del(positionCacheKey(membership.organizationId, membership.id))
+    expect((await getLatest(dispatcherToken, membership.id)).body.position.jobId).toBeNull()
+  })
+
+  it('returns 404 for unknown and cross-org agents without touching their rows', async () => {
+    const shadowToken = await tokenFor(shadowEmail)
+    const shadowMembership = await membershipFor(shadowEmail)
+    expect((await postPing(shadowToken, pingPayload({ latitude: 40.0 }))).status).toBe(201)
+
+    const dispatcherToken = await tokenFor(dispatcherEmail)
+    const crossOrg = await getLatest(dispatcherToken, shadowMembership.id)
+    expect(crossOrg.status).toBe(404)
+    expect(crossOrg.body.error.code).toBe('not_found')
+
+    const unknown = await getLatest(dispatcherToken, crypto.randomUUID())
+    expect(unknown.status).toBe(404)
+    expect(unknown.body.error.code).toBe('not_found')
+
+    expect(
+      await ownerDatabase.locationPing.count({
+        where: { organizationId: shadowMembership.organizationId },
+      }),
+    ).toBe(1)
+    expect((await getLatestList(dispatcherToken)).body.positions).toEqual([])
+  })
+
+  it('lists one latest position per same-org agent and nothing from other tenants', async () => {
+    const agentToken = await tokenFor(agentEmail)
+    const membership = await membershipFor(agentEmail)
+    const job = await createJobIn('dispatchgrid-demo', adminEmail)
+    expect((await postPing(agentToken, pingPayload({ jobId: job.id }))).status).toBe(201)
+
+    const peerToken = await createPeerAgent()
+    expect((await postPing(peerToken, pingPayload({ latitude: 48.85 }))).status).toBe(201)
+
+    const shadowToken = await tokenFor(shadowEmail)
+    expect((await postPing(shadowToken, pingPayload({ latitude: 40.0 }))).status).toBe(201)
+
+    const response = await getLatestList(await tokenFor(dispatcherEmail))
+    expect(response.status).toBe(200)
+    expect(response.body.positions).toHaveLength(2)
+    for (const position of response.body.positions) {
+      expect(position.organizationId).toBe(membership.organizationId)
+      expect(Object.keys(position).sort()).toEqual(
+        [
+          'accuracy',
+          'agentId',
+          'jobId',
+          'latitude',
+          'longitude',
+          'organizationId',
+          'recordedAt',
+          'source',
+        ].sort(),
+      )
+    }
+    const byAgent = new Map(response.body.positions.map((position) => [position.agentId, position]))
+    expect(byAgent.get(membership.id)).toMatchObject({ jobId: job.id, source: 'cache' })
+    expect([...byAgent.keys()]).not.toContain((await membershipFor(shadowEmail)).id)
+  })
+
+  it('gates both shapes to dispatcher-visible roles: admin and dispatcher pass, agents 403, anonymous 401', async () => {
+    const agentToken = await tokenFor(agentEmail)
+    const membership = await membershipFor(agentEmail)
+    expect((await postPing(agentToken, pingPayload())).status).toBe(201)
+
+    for (const email of [adminEmail, dispatcherEmail]) {
+      const token = await tokenFor(email)
+      expect((await getLatest(token, membership.id)).status).toBe(200)
+      expect((await getLatestList(token)).status).toBe(200)
+    }
+
+    // Agents cannot enumerate peers — and get no self-read carve-out: the
+    // POST 201 ack already confirms their own write.
+    expect((await getLatest(agentToken, membership.id)).status).toBe(403)
+    const peerToken = await createPeerAgent()
+    expect((await getLatestList(peerToken)).status).toBe(403)
+
+    expect((await request(app).get(`/api/v1/pings/latest/${membership.id}`)).status).toBe(401)
+    expect((await request(app).get('/api/v1/pings/latest')).status).toBe(401)
+  })
+
+  it('rejects bad agent ids and unknown query strings via the strict schemas', async () => {
+    const dispatcherToken = await tokenFor(dispatcherEmail)
+    const badId = await getLatest(dispatcherToken, 'not-a-uuid')
+    expect(badId.status).toBe(400)
+    expect(badId.body.error.code).toBe('validation_error')
+
+    const badListQuery = await request(app)
+      .get('/api/v1/pings/latest?injected=true')
+      .set('Authorization', `Bearer ${dispatcherToken}`)
+    expect(badListQuery.status).toBe(400)
+    expect(badListQuery.body.error.code).toBe('validation_error')
+
+    const membership = await membershipFor(agentEmail)
+    const badItemQuery = await request(app)
+      .get(`/api/v1/pings/latest/${membership.id}?injected=true`)
+      .set('Authorization', `Bearer ${dispatcherToken}`)
+    expect(badItemQuery.status).toBe(400)
+    expect(badItemQuery.body.error.code).toBe('validation_error')
+  })
+})
