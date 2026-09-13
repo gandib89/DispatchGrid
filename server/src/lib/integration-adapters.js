@@ -10,9 +10,14 @@ import {
   scheduleSlaCheck,
   slaDelayMs,
 } from './queue/index.js'
+import { recordEnqueueFailure } from './queue/metrics.js'
+import { REALTIME_EVENTS, publishToOrg } from './realtime/socket-server.js'
+import { serializeJob } from '../serializers/job-serializer.js'
 
 export const integrationAdapters = {
-  // Realtime fan-out lands in B15.
+  // Job-event hook point: the route seam fans out through here (before the
+  // enqueue below) on every committed write. Socket payloads publish at the
+  // route seam itself, where actor/from/to context lives.
   async publishJobEvent(_payload) {},
   async enqueueJobWork(payload) {
     await enqueueJobEvent({
@@ -23,17 +28,35 @@ export const integrationAdapters = {
       requestId: payload.requestId,
     })
   },
-  // Breach fan-out (B12): the worker's production path resolves breach side
-  // effects through this named seam, backed by the existing realtime publish
-  // and job-events queue above — never by ad-hoc fallbacks at the call site.
+  // Breach fan-out (B12, realtime B15-T2): the worker's production path
+  // resolves breach side effects through this named seam. Publishes the
+  // fixed escalated payload (job, threshold, SLA state, read fresh
+  // post-commit) to the org room. Fire-and-forget: a parked or failed
+  // publish is warned and metered, never thrown — PostgreSQL stays the
+  // correctness path. (A worker process with no attached socket server
+  // parks the publish the same way; cross-process fan-out rides T3.)
   async publishEscalationEvent(payload) {
-    await integrationAdapters.publishJobEvent({
-      jobId: payload.jobId,
-      organizationId: payload.organizationId,
-      escalationId: payload.escalationId,
-      threshold: payload.threshold,
-      requestId: payload.requestId,
-    })
+    try {
+      const job = await prisma.job.findUnique({ where: { id: payload.jobId } })
+      if (!job || job.organizationId !== payload.organizationId) {
+        return
+      }
+      const delivered = publishToOrg(payload.organizationId, REALTIME_EVENTS.JOB_ESCALATED, {
+        job: serializeJob(job),
+        threshold: payload.threshold,
+        slaState: job.slaState,
+      })
+      if (!delivered) {
+        recordEnqueueFailure()
+        logger.warn(
+          { jobId: payload.jobId, organizationId: payload.organizationId },
+          'Escalation realtime publish degraded',
+        )
+      }
+    } catch (error) {
+      recordEnqueueFailure()
+      logger.warn({ error }, 'Escalation realtime publish failed')
+    }
   },
   async enqueueEscalationNotification(payload) {
     await integrationAdapters.enqueueJobWork(payload)

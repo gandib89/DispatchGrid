@@ -23,6 +23,15 @@ export function orgRoom(organizationId) {
   return `org:${organizationId}`
 }
 
+// B15-T2 (#45): fixed realtime vocabulary. T3/T4 consume these names —
+// renaming is a cross-slice breaking change.
+export const REALTIME_EVENTS = Object.freeze({
+  JOB_CREATED: 'job.created',
+  JOB_UPDATED: 'job.updated',
+  JOB_ESCALATED: 'job.escalated',
+  AGENT_MOVED: 'agent.moved',
+})
+
 // Server-side membership lookup mirroring middleware/resolve-tenant.js: the
 // client may hint an org (auth.orgId), but the join target is always derived
 // from its own memberships. Throws with an HTTP-equivalent message.
