@@ -3,8 +3,10 @@ import { app } from './app.js'
 import { env } from './env.js'
 import { prisma } from './db/client.js'
 import { logger } from './lib/logger.js'
+import { attachSocketServer, closeSocketServer } from './lib/realtime/socket-server.js'
 
 const server = http.createServer(app)
+await attachSocketServer(server)
 let shuttingDown = false
 
 server.listen(env.PORT, () => {
@@ -16,6 +18,12 @@ async function shutdown(signal) {
   shuttingDown = true
 
   logger.info({ signal }, 'Graceful shutdown started')
+
+  try {
+    await closeSocketServer()
+  } catch (error) {
+    logger.error({ error }, 'Socket server failed to close cleanly')
+  }
 
   server.close(async (error) => {
     await prisma.$disconnect()
