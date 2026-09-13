@@ -11,6 +11,7 @@ import {
   positionCacheKey,
   readPosition,
 } from '../../lib/tracking/position-cache.js'
+import { LATEST_POSITIONS_LIMIT } from '../../routes/pings.js'
 import { createOwnerTestClient, resetDatabase } from '../helpers.js'
 
 // B14-T3 (#40) route seam against real Postgres + Redis: strict validation,
@@ -483,6 +484,28 @@ describe('GET /api/v1/pings/latest', () => {
     const byAgent = new Map(response.body.positions.map((position) => [position.agentId, position]))
     expect(byAgent.get(membership.id)).toMatchObject({ jobId: job.id, source: 'cache' })
     expect([...byAgent.keys()]).not.toContain((await membershipFor(shadowEmail)).id)
+  })
+
+  it('caps the latest-positions list at 100 agents (board-list precedent)', async () => {
+    expect(LATEST_POSITIONS_LIMIT).toBe(100)
+    const membership = await membershipFor(agentEmail)
+    const rows = Array.from({ length: LATEST_POSITIONS_LIMIT + 5 }, () => ({
+      organizationId: membership.organizationId,
+      agentId: crypto.randomUUID(),
+      jobId: null,
+      latitude: 51.5,
+      longitude: -0.12,
+      accuracy: 5.5,
+      recordedAt: new Date(),
+    }))
+    await ownerDatabase.locationPing.createMany({ data: rows })
+
+    const response = await getLatestList(await tokenFor(dispatcherEmail))
+    expect(response.status).toBe(200)
+    expect(response.body.positions).toHaveLength(LATEST_POSITIONS_LIMIT)
+    for (const position of response.body.positions) {
+      expect(position.organizationId).toBe(membership.organizationId)
+    }
   })
 
   it('gates both shapes to dispatcher-visible roles: admin and dispatcher pass, agents 403, anonymous 401', async () => {

@@ -25,10 +25,11 @@ ALTER TABLE "LocationPing" ADD CONSTRAINT "LocationPing_organizationId_fkey" FOR
 -- AddForeignKey
 ALTER TABLE "LocationPing" ADD CONSTRAINT "LocationPing_jobId_fkey" FOREIGN KEY ("jobId") REFERENCES "Job"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
--- Database-enforced ping truth: the coordinate-range, nonnegative-accuracy,
--- and recordedAt-presence CHECKs are the load-bearing guarantees. Prisma's
+-- Database-enforced ping truth: the coordinate-range and nonnegative-accuracy
+-- CHECKs are the load-bearing guarantees. Prisma's
 -- schema language cannot express them, so they live here as custom SQL
 -- (same pattern as the B07 job-domain and B12 SLA migrations).
+-- recordedAt presence rides on the NOT NULL column constraint (no CHECK).
 
 ALTER TABLE "LocationPing" ADD CONSTRAINT "LocationPing_coordinates_valid" CHECK (
   "latitude" >= -90 AND "latitude" <= 90
@@ -37,8 +38,4 @@ ALTER TABLE "LocationPing" ADD CONSTRAINT "LocationPing_coordinates_valid" CHECK
 
 ALTER TABLE "LocationPing" ADD CONSTRAINT "LocationPing_accuracy_nonnegative" CHECK (
   "accuracy" >= 0
-);
-
-ALTER TABLE "LocationPing" ADD CONSTRAINT "LocationPing_recordedAt_present" CHECK (
-  "recordedAt" IS NOT NULL
 );

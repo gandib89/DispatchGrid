@@ -118,9 +118,10 @@ describe('LocationPing accuracy check', () => {
 })
 
 describe('LocationPing recordedAt presence', () => {
-  it('rejects a NULL recordedAt at the database', async () => {
+  it('rejects a NULL recordedAt via the NOT NULL column constraint', async () => {
     const { organization, membership } = await createIdentityFixture(ownerDatabase)
 
+    // No recordedAt CHECK exists: presence rides on the NOT NULL column.
     await expect(
       ownerDatabase.$executeRaw`
         INSERT INTO "LocationPing"
@@ -128,7 +129,7 @@ describe('LocationPing recordedAt presence', () => {
         VALUES
           (gen_random_uuid(), ${organization.id}::uuid, ${membership.id}::uuid, NULL, 51.5, -0.12, 5, NULL, NOW())
       `,
-    ).rejects.toThrow()
+    ).rejects.toThrow(/null value.*recordedAt|violates not-null constraint/i)
   })
 })
 
