@@ -326,7 +326,7 @@ describe('realtime publishes', () => {
       .set('Idempotency-Key', crypto.randomUUID())
       .send(jobPayload())
     expect(created.status).toBe(201)
-    expect(queueMetrics.enqueueFailuresTotal).toBeGreaterThan(0)
+    expect(queueMetrics.realtimePublishFailuresTotal).toBeGreaterThan(0)
 
     const agent = await tokenFor(agentEmail)
     const posted = await request(app)

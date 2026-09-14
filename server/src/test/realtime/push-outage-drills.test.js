@@ -30,9 +30,9 @@ import { createOwnerTestClient, resetDatabase } from '../helpers.js'
 //
 // DEVIATION (honest, pre-existing): killing the whole Redis container also
 // stalls BullMQ enqueue (queue.add awaits Redis with no timeout — B11 owns
-// that path), so the request would hang instead of staying 2xx. The drills
-// kill the push tier only, which is the "losing push" the spec cares about:
-// losing push delays visibility, never correctness.
+// that path, follow-up #50), so the request would hang instead of staying
+// 2xx. The drills kill the push tier only, which is the "losing push" the
+// spec cares about: losing push delays visibility, never correctness.
 
 const ownerDatabase = createOwnerTestClient()
 
@@ -76,7 +76,7 @@ async function membershipIdFor(email) {
 
 async function startInstance() {
   const httpServer = http.createServer(app)
-  await attachSocketServer(httpServer, { enableAdapter: true })
+  await attachSocketServer(httpServer, { enableAdapter: true, allowMultiple: true })
   await new Promise((resolve) => httpServer.listen(0, resolve))
   httpServers.push(httpServer)
   return `http://localhost:${httpServer.address().port}`
@@ -250,8 +250,8 @@ describe('push-outage drills', () => {
     })
     expect(pinged.status).toBe(201)
 
-    // One metered degradation per parked publish (created, updated, moved).
-    expect(queueMetrics.enqueueFailuresTotal).toBeGreaterThanOrEqual(3)
+    // One metered realtime degradation per parked publish (created, updated, moved).
+    expect(queueMetrics.realtimePublishFailuresTotal).toBeGreaterThanOrEqual(3)
 
     // PostgreSQL truth stays exact throughout — board, detail, positions.
     const board = await readBoard(urlP, dispatcher)

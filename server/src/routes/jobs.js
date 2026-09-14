@@ -16,7 +16,7 @@ import { serializeAssignment, serializeEvent, serializeJob } from '../serializer
 import { afterJobCommit as runPostCommitHooks, scheduleSlaAfterAssign } from '../lib/integration-adapters.js'
 import { REALTIME_EVENTS, publishToOrg } from '../lib/realtime/socket-server.js'
 import { removePendingSlaEvaluations } from '../lib/queue/index.js'
-import { recordEnqueueFailure } from '../lib/queue/metrics.js'
+import { recordEnqueueFailure, recordRealtimePublishFailure } from '../lib/queue/metrics.js'
 
 // B10-T2/T3/T4 (built): transitions (PATCH, start/complete/cancel/fail),
 // suggestions, timeline/events. They reuse this pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
@@ -117,7 +117,7 @@ async function afterJobCommit(req, actor, job, { event = 'updated' } = {}) {
     const organizationId = actor.organizationId
     if (event === 'created') {
       if (!publishToOrg(organizationId, REALTIME_EVENTS.JOB_CREATED, { job: serializeJob(job) })) {
-        recordEnqueueFailure()
+        recordRealtimePublishFailure()
         req.log?.warn?.({ organizationId, jobId: job.id }, 'Realtime job publish degraded')
       }
     } else {
@@ -132,12 +132,12 @@ async function afterJobCommit(req, actor, job, { event = 'updated' } = {}) {
         actor: { userId: actor.userId },
       }
       if (!publishToOrg(organizationId, REALTIME_EVENTS.JOB_UPDATED, payload)) {
-        recordEnqueueFailure()
+        recordRealtimePublishFailure()
         req.log?.warn?.({ organizationId, jobId: job.id }, 'Realtime job publish degraded')
       }
     }
   } catch (error) {
-    recordEnqueueFailure()
+    recordRealtimePublishFailure()
     req.log?.warn?.({ error }, 'Post-commit realtime publish failed')
   }
 }

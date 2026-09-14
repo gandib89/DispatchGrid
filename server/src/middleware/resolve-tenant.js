@@ -1,5 +1,6 @@
 import { prisma } from '../db/client.js'
 import { notFound, badRequest, unauthorized } from '../errors/http-errors.js'
+import { findOrgMembership } from '../lib/membership.js'
 
 export function resolveTenant({ allowWithoutOrg = false } = {}) {
   return async (req, _res, next) => {
@@ -22,26 +23,18 @@ export function resolveTenant({ allowWithoutOrg = false } = {}) {
         },
       })
 
-      if (memberships.length === 0) {
-        if (allowWithoutOrg) {
+      const { membership, reason } = findOrgMembership(memberships, requestedOrgId)
+      if (!membership) {
+        if (reason === 'no-membership' && allowWithoutOrg) {
           next()
           return
         }
-        throw notFound('Organization not found')
-      }
-
-      let membership = null
-      if (requestedOrgId) {
-        membership = memberships.find((item) => item.organizationId === requestedOrgId)
-        if (!membership) {
-          throw notFound('Organization not found')
+        if (reason === 'selection-required') {
+          throw badRequest('Organization selection is required', {
+            header: 'x-organization-id',
+          })
         }
-      } else if (memberships.length === 1) {
-        membership = memberships[0]
-      } else {
-        throw badRequest('Organization selection is required', {
-          header: 'x-organization-id',
-        })
+        throw notFound('Organization not found')
       }
 
       const permissions = membership.role.rolePermissions.map((link) => link.permission.code)

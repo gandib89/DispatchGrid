@@ -20,8 +20,9 @@ import { createOwnerTestClient, resetDatabase } from '../helpers.js'
 // learning experiment: the same setup loses the event.
 //
 // SCOPE: in-process publishes only (job.created via the route seam).
-// Worker-process escalation parks — no socket server lives in the worker
-// (see the WORKER GAP note in lib/integration-adapters.js).
+// Worker-process escalation rides the send-only Redis bridge instead of
+// parking (see the WORKER GAP note in lib/integration-adapters.js, proven by
+// worker-escalation-bridge.test.js).
 
 const ownerDatabase = createOwnerTestClient()
 
@@ -65,7 +66,7 @@ async function orgIdFor(email) {
 
 async function startInstance({ enableAdapter }) {
   const httpServer = http.createServer(app)
-  await attachSocketServer(httpServer, { enableAdapter })
+  await attachSocketServer(httpServer, { enableAdapter, allowMultiple: true })
   await new Promise((resolve) => httpServer.listen(0, resolve))
   httpServers.push(httpServer)
   return `http://localhost:${httpServer.address().port}`
