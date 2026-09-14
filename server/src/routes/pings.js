@@ -7,7 +7,7 @@ import { resolveTenant } from '../middleware/resolve-tenant.js'
 import { notFound } from '../errors/http-errors.js'
 import { pingLimiter } from '../lib/rate-limit.js'
 import { logger } from '../lib/logger.js'
-import { recordEnqueueFailure } from '../lib/queue/metrics.js'
+import { recordRealtimePublishFailure } from '../lib/queue/metrics.js'
 import { REALTIME_EVENTS, publishToOrg } from '../lib/realtime/socket-server.js'
 import { readPosition, writePosition } from '../lib/tracking/position-cache.js'
 import { pingSchemas } from '../../../shared/ping-schema.js'
@@ -95,14 +95,14 @@ router.post(
           recordedAt: input.recordedAt,
         })
         if (!delivered) {
-          recordEnqueueFailure()
+          recordRealtimePublishFailure()
           logger.warn(
             { organizationId: actor.organizationId, agentId: actor.membershipId },
             'Realtime movement publish degraded',
           )
         }
       } catch (error) {
-        recordEnqueueFailure()
+        recordRealtimePublishFailure()
         logger.warn({ error }, 'Realtime movement publish failed after ping insert')
       }
 

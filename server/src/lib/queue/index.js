@@ -7,7 +7,7 @@ import { recordDeadLettered, recordEnqueueFailure } from './metrics.js'
 
 export { SLA_THRESHOLDS }
 
-export { queueMetrics, recordEnqueueFailure, recordDeadLettered, resetQueueMetrics } from './metrics.js'
+export { queueMetrics, recordEnqueueFailure, recordDeadLettered, recordRealtimePublishFailure, resetQueueMetrics } from './metrics.js'
 
 // Centralized queue module (B11-T1). Single owner of Redis/BullMQ connection
 // creation, named queues, shared retry/backoff defaults, and producer helpers.

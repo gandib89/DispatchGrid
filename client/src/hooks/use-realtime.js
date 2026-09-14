@@ -91,6 +91,26 @@ export function patchRealtimeCache(client, event, payload) {
   }
 }
 
+// Module-level reconcile guard (B15 review): the hook never disconnects on
+// unmount so concurrent users share the one socket — N hook instances would
+// otherwise reconcile N times for one reconnect. A single in-flight
+// reconcile is shared across instances; single owner today so behavior is
+// unchanged.
+let reconcileInFlight = null
+
+function sharedReconcile(client, onReconcile) {
+  if (reconcileInFlight) {
+    return reconcileInFlight
+  }
+  const run = onReconcile ? () => onReconcile() : () => client.invalidateQueries()
+  reconcileInFlight = Promise.resolve()
+    .then(run)
+    .finally(() => {
+      reconcileInFlight = null
+    })
+  return reconcileInFlight
+}
+
 // Single socket lifecycle owner is the app shell (calls this once). The hook
 // never disconnects on unmount so concurrent users share the one socket.
 // Returns disconnect state for the persistent banner + polling flag:
@@ -123,11 +143,7 @@ export function useRealtime(options = {}) {
     const handleConnect = () => {
       if (needsReconcile) {
         needsReconcile = false
-        if (onReconcile) {
-          onReconcile()
-        } else {
-          client.invalidateQueries()
-        }
+        void sharedReconcile(client, onReconcile)
       }
     }
     const handleDisconnect = () => {

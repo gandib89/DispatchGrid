@@ -181,4 +181,40 @@ describe('useRealtime', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(fetch).toHaveBeenCalledTimes(2)
   })
+
+  it('shares a single in-flight reconcile across hook instances', async () => {
+    const fake = createFakeSocket()
+    io.mockReturnValue(fake)
+    const client = testClient()
+    const onReconcile = vi.fn()
+
+    function TwoOwners() {
+      useRealtime({ queryClient: client, onReconcile })
+      useRealtime({ queryClient: client, onReconcile })
+      return null
+    }
+
+    render(
+      <QueryClientProvider client={client}>
+        <TwoOwners />
+      </QueryClientProvider>,
+    )
+
+    act(() => {
+      fake.emitLocal('disconnect', undefined)
+      fake.emitLocal('connect', undefined)
+    })
+
+    // One reconnect, one shared reconcile — not one per hook instance.
+    await waitFor(() => expect(onReconcile).toHaveBeenCalledTimes(1))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(onReconcile).toHaveBeenCalledTimes(1)
+
+    // The guard clears after settling: the next reconnect reconciles again.
+    act(() => {
+      fake.emitLocal('disconnect', undefined)
+      fake.emitLocal('connect', undefined)
+    })
+    await waitFor(() => expect(onReconcile).toHaveBeenCalledTimes(2))
+  })
 })

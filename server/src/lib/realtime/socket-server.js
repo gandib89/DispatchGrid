@@ -3,6 +3,7 @@ import { Server } from 'socket.io'
 import { verifyAccessToken } from '../../auth/tokens.js'
 import { prisma } from '../../db/client.js'
 import { env } from '../../env.js'
+import { findOrgMembership } from '../membership.js'
 import { createRedisClient } from '../redis.js'
 import { logger } from '../logger.js'
 
@@ -24,7 +25,9 @@ export function orgRoom(organizationId) {
 }
 
 // B15-T2 (#45): fixed realtime vocabulary. T3/T4 consume these names —
-// renaming is a cross-slice breaking change.
+// renaming is a cross-slice breaking change. job.escalated is BREACH-only by
+// decision (B13): WARNING records its escalation row and SLA state but
+// promises no delivery; only a BREACH threshold fans out.
 export const REALTIME_EVENTS = Object.freeze({
   JOB_CREATED: 'job.created',
   JOB_UPDATED: 'job.updated',
@@ -47,20 +50,13 @@ async function resolveSocketActor(userId, requestedOrgId) {
     },
   })
 
-  if (memberships.length === 0) {
-    throw new Error('Organization not found')
-  }
+  const { membership, reason } = findOrgMembership(memberships, requestedOrgId)
 
-  let membership
-  if (requestedOrgId) {
-    membership = memberships.find((item) => item.organizationId === requestedOrgId) ?? null
-    if (!membership) {
-      throw new Error('Organization not found')
+  if (!membership) {
+    if (reason === 'selection-required') {
+      throw new Error('Organization selection is required')
     }
-  } else if (memberships.length === 1) {
-    membership = memberships[0]
-  } else {
-    throw new Error('Organization selection is required')
+    throw new Error('Organization not found')
   }
 
   return {
@@ -70,6 +66,32 @@ async function resolveSocketActor(userId, requestedOrgId) {
     roleId: membership.roleId,
     roleName: membership.role.name,
     permissions: membership.role.rolePermissions.map((link) => link.permission.code),
+  }
+}
+
+// Worker→socket bridge (B15 review): the worker process never attaches a
+// socket server, so a worker-originated publish parks at publishToOrg. The
+// bridge is a send-only Redis channel — worker/lib publishes
+// { orgId, event, payload } JSON via the existing redis client factory, and
+// every attached socket server subscribes and re-emits locally (.local, so N
+// subscribers deliver once each instead of N adapter broadcasts). Services
+// stay socket-free; no new npm deps.
+export const REALTIME_BRIDGE_CHANNEL = 'dispatchgrid:realtime-bridge'
+
+// Send-only bridge publish for socket-free processes (worker) and for the
+// API fallback when no server is attached here. Returns true when the JSON
+// hit Redis, false when Redis is down. Never throws.
+export async function publishBridgeEvent(organizationId, event, payload) {
+  const client = createRedisClient()
+  try {
+    await client.connect()
+    await client.publish(REALTIME_BRIDGE_CHANNEL, JSON.stringify({ orgId: organizationId, event, payload }))
+    return true
+  } catch (error) {
+    logger.warn({ error, organizationId, event }, 'Realtime bridge publish degraded')
+    return false
+  } finally {
+    await client.quit().catch(() => {})
   }
 }
 
@@ -107,12 +129,20 @@ export function getSocketServer() {
 // Attach to a real HTTP server (node:http createServer). enableAdapter:false
 // skips the Redis adapter for adapter-less unit use; production always adapts.
 //
-// Production attaches exactly once (index.js). The T3 two-instance test
-// attaches twice (A then B) to model two API instances sharing one Redis:
-// every attach is tracked for close, and publishToOrg emits via the most
-// recently attached server — so a write handled by B emits from B and reaches
-// a socket on A only through the Redis adapter.
-export async function attachSocketServer(httpServer, { enableAdapter = true } = {}) {
+// Production invariant: exactly one attach per API process (index.js). The
+// default keeps the first attach and warns on a second; tests modelling N
+// API instances pass allowMultiple:true for newest-wins publishToOrg (T3
+// attaches A then B to model two instances sharing one Redis): every attach
+// is tracked for close, and publishToOrg emits via the most recently attached
+// server — so a write handled by B emits from B and reaches a socket on A
+// only through the Redis adapter. The bridge subscription below is
+// independent of the adapter: every attach subscribes, including
+// adapter-less ones.
+export async function attachSocketServer(httpServer, { enableAdapter = true, allowMultiple = false } = {}) {
+  if (attached.length > 0 && !allowMultiple) {
+    logger.warn('Socket server already attached; keeping the first attach')
+    return io
+  }
 
   const server = new Server(httpServer, {
     cors: { origin: env.CLIENT_ORIGIN, credentials: true },
@@ -172,7 +202,29 @@ export async function attachSocketServer(httpServer, { enableAdapter = true } = 
     clients = { pubClient, subClient }
   }
 
-  attached.push({ server, clients })
+  // Bridge subscription: re-emit worker-originated { orgId, event, payload }
+  // locally to the org room. .local keeps each subscriber to its own sockets
+  // so N attached servers deliver once each instead of N adapter broadcasts.
+  const bridgeClient = createRedisClient()
+  await bridgeClient.connect()
+  await bridgeClient.subscribe(REALTIME_BRIDGE_CHANNEL, (message) => {
+    let parsed
+    try {
+      parsed = JSON.parse(message)
+    } catch {
+      return
+    }
+    if (!parsed?.orgId || !parsed?.event) {
+      return
+    }
+    try {
+      server.to(orgRoom(parsed.orgId)).local.emit(parsed.event, parsed.payload)
+    } catch (error) {
+      logger.warn({ error }, 'Realtime bridge re-emit degraded')
+    }
+  })
+
+  attached.push({ server, clients, bridgeClient })
   io = server
   return server
 }
@@ -199,12 +251,17 @@ export function publishToOrg(organizationId, event, payload) {
 }
 
 // Test/shutdown helper mirroring closeQueues/closePositionCache: closes every
-// attached server, then each dedicated adapter pair. Idempotent.
+// attached server, then each dedicated adapter pair and bridge subscription.
+// Idempotent.
 export async function closeSocketServer() {
   const servers = attached.splice(0)
   io = null
 
-  for (const { server, clients } of servers) {
+  for (const { server, clients, bridgeClient } of servers) {
+    if (bridgeClient) {
+      await bridgeClient.unsubscribe(REALTIME_BRIDGE_CHANNEL).catch(() => {})
+      await bridgeClient.quit().catch(() => {})
+    }
     await server.close()
     if (clients) {
       await clients.subClient.quit().catch(() => {})
