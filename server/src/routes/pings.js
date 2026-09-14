@@ -7,6 +7,8 @@ import { resolveTenant } from '../middleware/resolve-tenant.js'
 import { notFound } from '../errors/http-errors.js'
 import { pingLimiter } from '../lib/rate-limit.js'
 import { logger } from '../lib/logger.js'
+import { recordRealtimePublishFailure } from '../lib/queue/metrics.js'
+import { REALTIME_EVENTS, publishToOrg } from '../lib/realtime/socket-server.js'
 import { readPosition, writePosition } from '../lib/tracking/position-cache.js'
 import { pingSchemas } from '../../../shared/ping-schema.js'
 import { serializePing, serializePosition } from '../serializers/ping-serializer.js'
@@ -79,6 +81,29 @@ router.post(
         })
       } catch (error) {
         logger.warn({ error }, 'Position cache write failed after ping insert')
+      }
+
+      // B15-T2: fire-and-forget movement publish beside the hot-cache write.
+      // Minimal fixed payload (agent + coordinates + timestamp) to the org
+      // room only. A parked or failed publish is warned and metered; the
+      // committed ping stands and the request stays 201.
+      try {
+        const delivered = publishToOrg(actor.organizationId, REALTIME_EVENTS.AGENT_MOVED, {
+          agentId: actor.membershipId,
+          latitude: input.latitude,
+          longitude: input.longitude,
+          recordedAt: input.recordedAt,
+        })
+        if (!delivered) {
+          recordRealtimePublishFailure()
+          logger.warn(
+            { organizationId: actor.organizationId, agentId: actor.membershipId },
+            'Realtime movement publish degraded',
+          )
+        }
+      } catch (error) {
+        recordRealtimePublishFailure()
+        logger.warn({ error }, 'Realtime movement publish failed after ping insert')
       }
 
       res.status(201).json({ ping: serializePing(ping) })

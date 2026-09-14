@@ -14,8 +14,9 @@ import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
 import { serializeAssignment, serializeEvent, serializeJob } from '../serializers/job-serializer.js'
 import { afterJobCommit as runPostCommitHooks, scheduleSlaAfterAssign } from '../lib/integration-adapters.js'
+import { REALTIME_EVENTS, publishToOrg } from '../lib/realtime/socket-server.js'
 import { removePendingSlaEvaluations } from '../lib/queue/index.js'
-import { recordEnqueueFailure } from '../lib/queue/metrics.js'
+import { recordEnqueueFailure, recordRealtimePublishFailure } from '../lib/queue/metrics.js'
 
 // B10-T2/T3/T4 (built): transitions (PATCH, start/complete/cancel/fail),
 // suggestions, timeline/events. They reuse this pipeline (authenticate -> resolveTenant -> authorize -> strict parse ->
@@ -74,7 +75,7 @@ export function clearBoardCache() {
 // inside the service; a throwing hook must never fail the request or the board.
 // The failure is warned (logged) and counted (metered via queueMetrics); the
 // committed business state stands and reconciliation (T4) repairs the gap.
-async function afterJobCommit(req, actor, job) {
+async function afterJobCommit(req, actor, job, { event = 'updated' } = {}) {
   invalidateBoardCache(actor.organizationId)
   const requestId = req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID()
   try {
@@ -106,6 +107,38 @@ async function afterJobCommit(req, actor, job) {
   } catch (error) {
     recordEnqueueFailure()
     req.log?.warn?.({ error }, 'Post-commit SLA hook failed')
+  }
+  // B15-T2: fire-and-forget org publish after commit. Created carries the
+  // job; every other write carries job + from/to + actor (from/to read back
+  // from the durable JobEvent the service wrote in the same commit, so
+  // services stay socket-free). A parked or failed publish is warned and
+  // metered; the committed state stands and the request stays 2xx.
+  try {
+    const organizationId = actor.organizationId
+    if (event === 'created') {
+      if (!publishToOrg(organizationId, REALTIME_EVENTS.JOB_CREATED, { job: serializeJob(job) })) {
+        recordRealtimePublishFailure()
+        req.log?.warn?.({ organizationId, jobId: job.id }, 'Realtime job publish degraded')
+      }
+    } else {
+      const lastEvent = await prisma.jobEvent.findFirst({
+        where: { jobId: job.id, organizationId },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      })
+      const payload = {
+        job: serializeJob(job),
+        from: lastEvent?.fromStatus ?? job.status,
+        to: lastEvent?.toStatus ?? job.status,
+        actor: { userId: actor.userId },
+      }
+      if (!publishToOrg(organizationId, REALTIME_EVENTS.JOB_UPDATED, payload)) {
+        recordRealtimePublishFailure()
+        req.log?.warn?.({ organizationId, jobId: job.id }, 'Realtime job publish degraded')
+      }
+    }
+  } catch (error) {
+    recordRealtimePublishFailure()
+    req.log?.warn?.({ error }, 'Post-commit realtime publish failed')
   }
 }
 
@@ -190,7 +223,7 @@ router.post(
       const { job, replay } = await createJob(actor, input, {
         key: idempotencyKeyFrom(req),
       })
-      await afterJobCommit(req, actor, job)
+      await afterJobCommit(req, actor, job, { event: 'created' })
       if (replay) {
         req.idempotentReplay = true
         res.set('Idempotent-Replay', 'true')

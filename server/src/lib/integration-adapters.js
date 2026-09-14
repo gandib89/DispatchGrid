@@ -10,9 +10,14 @@ import {
   scheduleSlaCheck,
   slaDelayMs,
 } from './queue/index.js'
+import { recordRealtimePublishFailure } from './queue/metrics.js'
+import { REALTIME_EVENTS, publishBridgeEvent, publishToOrg } from './realtime/socket-server.js'
+import { serializeJob } from '../serializers/job-serializer.js'
 
 export const integrationAdapters = {
-  // Realtime fan-out lands in B15.
+  // Job-event hook point: the route seam fans out through here (before the
+  // enqueue below) on every committed write. Socket payloads publish at the
+  // route seam itself, where actor/from/to context lives.
   async publishJobEvent(_payload) {},
   async enqueueJobWork(payload) {
     await enqueueJobEvent({
@@ -23,17 +28,48 @@ export const integrationAdapters = {
       requestId: payload.requestId,
     })
   },
-  // Breach fan-out (B12): the worker's production path resolves breach side
-  // effects through this named seam, backed by the existing realtime publish
-  // and job-events queue above — never by ad-hoc fallbacks at the call site.
-  async publishEscalationEvent(payload) {
-    await integrationAdapters.publishJobEvent({
-      jobId: payload.jobId,
-      organizationId: payload.organizationId,
-      escalationId: payload.escalationId,
-      threshold: payload.threshold,
-      requestId: payload.requestId,
-    })
+  // Breach fan-out (B12, realtime B15-T2, bridged B15 review): the worker's
+  // production path resolves breach side effects through this named seam.
+  // Publishes the fixed escalated payload (job, threshold, SLA state, read
+  // fresh post-commit) to the org room. Fire-and-forget: a parked or failed
+  // publish is warned and metered on the realtime counter, never thrown —
+  // PostgreSQL stays the correctness path. WORKER GAP — bridged, not parked:
+  // a worker process has no attached socket server, so publishToOrg parks
+  // there; the fallback publishes the same payload as { orgId, event,
+  // payload } JSON on the send-only Redis bridge (REALTIME_BRIDGE_CHANNEL),
+  // and every attached socket server re-emits it locally to the org room.
+  // T3 proves API-instance fan-out for in-process publishes; the
+  // worker-escalation-bridge drill proves the worker-originated path. No
+  // socket tier, no new emitter dependency, services stay socket-free.
+  // job.escalated is BREACH-only (B13): callers never invoke this for WARNING.
+  async publishEscalationEvent(payload, deps = {}) {
+    try {
+      const job = await prisma.job.findUnique({ where: { id: payload.jobId } })
+      if (!job || job.organizationId !== payload.organizationId) {
+        return
+      }
+      const body = {
+        job: serializeJob(job),
+        threshold: payload.threshold,
+        slaState: job.slaState,
+      }
+      const publishLocal = deps.publishToOrg ?? publishToOrg
+      if (publishLocal(payload.organizationId, REALTIME_EVENTS.JOB_ESCALATED, body)) {
+        return
+      }
+      const publishBridge = deps.publishBridgeEvent ?? publishBridgeEvent
+      if (await publishBridge(payload.organizationId, REALTIME_EVENTS.JOB_ESCALATED, body)) {
+        return
+      }
+      recordRealtimePublishFailure()
+      logger.warn(
+        { jobId: payload.jobId, organizationId: payload.organizationId },
+        'Escalation realtime publish degraded',
+      )
+    } catch (error) {
+      recordRealtimePublishFailure()
+      logger.warn({ error }, 'Escalation realtime publish failed')
+    }
   },
   async enqueueEscalationNotification(payload) {
     await integrationAdapters.enqueueJobWork(payload)

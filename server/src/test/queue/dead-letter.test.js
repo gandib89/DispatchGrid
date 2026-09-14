@@ -1,5 +1,6 @@
 import crypto from 'node:crypto'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import http from 'node:http'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import request from 'supertest'
 import { seedDatabase } from '../../../prisma/seed.js'
 import { app } from '../../app.js'
@@ -18,6 +19,7 @@ import {
   getQueue,
 } from '../../lib/queue/index.js'
 import { queueMetrics, resetQueueMetrics } from '../../lib/queue/metrics.js'
+import { attachSocketServer, closeSocketServer } from '../../lib/realtime/socket-server.js'
 import { startWorker, stopWorker } from '../../worker.js'
 import { routeQueueJob } from '../../worker/handlers/index.js'
 import { createOwnerTestClient, resetDatabase } from '../helpers.js'
@@ -180,6 +182,25 @@ describe('dead-letter path', () => {
 })
 
 describe('Redis-out degradation', () => {
+  let httpServer
+
+  beforeEach(async () => {
+    // The API process always serves sockets (index.js attaches on boot):
+    // attach here so the injected queue failure is the only fault the
+    // meter counts and the exact toBe(1) below keeps meaning "one cause".
+    httpServer = http.createServer(app)
+    await attachSocketServer(httpServer)
+    await new Promise((resolve) => httpServer.listen(0, resolve))
+  })
+
+  afterEach(async () => {
+    await closeSocketServer()
+    if (httpServer) {
+      await new Promise((resolve) => httpServer.close(resolve))
+      httpServer = null
+    }
+  })
+
   it('REST keeps working per the limiter policy while async pauses', async () => {
     const token = await tokenFor(dispatcherEmail)
     const requestId = `req-redis-out-${crypto.randomUUID()}`
