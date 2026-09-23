@@ -3,6 +3,30 @@ import { HttpResponse, http } from 'msw'
 export const mockUser = { id: 'user-1', email: 'dispatcher@example.com' }
 export const mockCredentials = { email: mockUser.email, password: 'password123' }
 export const mockAccessToken = 'mock-access-token'
+export const mockOrganization = {
+  id: 'org-1',
+  name: 'DispatchGrid Demo',
+  slug: 'dispatchgrid-demo',
+  defaultConcurrentJobCap: 3,
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+}
+export const mockMember = {
+  id: 'membership-1',
+  organizationId: mockOrganization.id,
+  userId: mockUser.id,
+  roleId: 'role-1',
+  roleName: 'ADMIN',
+  isAvailable: false,
+  concurrentJobCap: 3,
+  user: { id: mockUser.id, email: mockUser.email, displayName: 'Dispatcher' },
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+}
+
+function hasBearer(request) {
+  return request.headers.get('authorization') === `Bearer ${mockAccessToken}`
+}
 
 export const jobsBoard = {
   jobs: [{ id: 'job-1', status: 'PENDING', title: 'Pump' }],
@@ -67,9 +91,23 @@ export const handlers = [
   ),
 
   http.get('*/api/v1/auth/me', ({ request }) => {
-    if (request.headers.get('authorization') !== `Bearer ${mockAccessToken}`) {
+    if (!hasBearer(request)) {
       return fail(401, 'unauthorized', 'Invalid or expired access token')
     }
     return HttpResponse.json({ id: mockUser.id, email: mockUser.email })
+  }),
+
+  http.get('*/api/v1/organizations', ({ request }) => {
+    if (!hasBearer(request)) {
+      return fail(401, 'unauthorized', 'Invalid or expired access token')
+    }
+    return HttpResponse.json({ organizations: [mockOrganization] })
+  }),
+
+  http.get('*/api/v1/organizations/:orgId/members', ({ request }) => {
+    if (!hasBearer(request)) {
+      return fail(401, 'unauthorized', 'Invalid or expired access token')
+    }
+    return HttpResponse.json({ members: [mockMember] })
   }),
 ]
