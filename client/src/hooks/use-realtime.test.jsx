@@ -1,5 +1,5 @@
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { render, screen, waitFor, act } from '@testing-library/react'
+import { useQuery } from '@tanstack/react-query'
+import { screen, waitFor, act } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('socket.io-client', () => ({ io: vi.fn() }))
@@ -8,6 +8,7 @@ import { AppShell } from '../components/AppShell.jsx'
 import { apiRequest } from '../lib/api-client.js'
 import { REALTIME_EVENTS, disconnectSocket, getConnectionStatus } from '../lib/socket-client.js'
 import { queryClient as appQueryClient } from '../query-client.js'
+import { createTestQueryClient, renderWithProviders } from '../test/render.jsx'
 import { POLLING_INTERVAL_MS, useRealtime } from './use-realtime.js'
 import { io } from 'socket.io-client'
 
@@ -32,17 +33,6 @@ function createFakeSocket() {
   }
 }
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function testClient() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
-}
-
 const oldJob = { id: 'job-1', status: 'open', version: 1, title: 'Old title' }
 const updatedJob = { id: 'job-1', status: 'assigned', version: 2, title: 'Old title' }
 
@@ -58,26 +48,21 @@ beforeEach(() => {
 
 afterEach(() => {
   disconnectSocket()
-  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('useRealtime', () => {
   it('patches board, detail, and positions in place with zero fetches', async () => {
     const fake = createFakeSocket()
     io.mockReturnValue(fake)
-    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok' }))
-    vi.stubGlobal('fetch', fetch)
-    const client = testClient()
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    const client = createTestQueryClient()
     client.setQueryData(['jobs'], [oldJob])
     client.setQueryData(['job', 'job-1'], oldJob)
     client.setQueryData(['positions'], { 'agent-1': { agentId: 'agent-1', latitude: 1, longitude: 1 } })
     client.setQueryData(['positions', 'agent-1'], { agentId: 'agent-1', latitude: 1, longitude: 1 })
 
-    render(
-      <QueryClientProvider client={client}>
-        <Probe client={client} />
-      </QueryClientProvider>,
-    )
+    renderWithProviders(<Probe client={client} />, { queryClient: client })
     act(() => {
       fake.emitLocal('connect', undefined)
     })
@@ -118,14 +103,11 @@ describe('useRealtime', () => {
   it('exposes the polling flag and banner on drop', () => {
     const fake = createFakeSocket()
     io.mockReturnValue(fake)
-    const client = testClient()
 
-    render(
-      <QueryClientProvider client={client}>
-        <AppShell>
-          <div>child</div>
-        </AppShell>
-      </QueryClientProvider>,
+    renderWithProviders(
+      <AppShell>
+        <div>child</div>
+      </AppShell>,
     )
 
     // Singleton starts disconnected, so the persistent banner shows at once.
@@ -148,12 +130,8 @@ describe('useRealtime', () => {
   it('reconciles exactly once on reconnect', async () => {
     const fake = createFakeSocket()
     io.mockReturnValue(fake)
-    const fetch = vi.fn(async (url) => {
-      if (String(url).endsWith('/api/v1/jobs')) return jsonResponse({ jobs: [oldJob] })
-      return jsonResponse({ status: 'ok' })
-    })
-    vi.stubGlobal('fetch', fetch)
-    const client = testClient()
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    const client = createTestQueryClient()
 
     function Board() {
       const board = useQuery({ queryKey: ['jobs'], queryFn: () => apiRequest('/api/v1/jobs') })
@@ -161,11 +139,7 @@ describe('useRealtime', () => {
       return <div data-testid="board">{board.data ? 'loaded' : 'loading'}</div>
     }
 
-    render(
-      <QueryClientProvider client={client}>
-        <Board />
-      </QueryClientProvider>,
-    )
+    renderWithProviders(<Board />, { queryClient: client })
 
     await waitFor(() => expect(screen.getByTestId('board')).toHaveTextContent('loaded'))
     expect(fetch).toHaveBeenCalledTimes(1)
@@ -185,7 +159,7 @@ describe('useRealtime', () => {
   it('shares a single in-flight reconcile across hook instances', async () => {
     const fake = createFakeSocket()
     io.mockReturnValue(fake)
-    const client = testClient()
+    const client = createTestQueryClient()
     const onReconcile = vi.fn()
 
     function TwoOwners() {
@@ -194,11 +168,7 @@ describe('useRealtime', () => {
       return null
     }
 
-    render(
-      <QueryClientProvider client={client}>
-        <TwoOwners />
-      </QueryClientProvider>,
-    )
+    renderWithProviders(<TwoOwners />, { queryClient: client })
 
     act(() => {
       fake.emitLocal('disconnect', undefined)

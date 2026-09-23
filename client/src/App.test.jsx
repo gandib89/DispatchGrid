@@ -1,37 +1,38 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
 import App from './App.jsx'
+import { setAccessToken } from './lib/api-client.js'
+import { mockAccessToken, mockUser } from './mocks/handlers.js'
+import { renderWithProviders } from './test/render.jsx'
 
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
+describe('App routing', () => {
+  it('redirects unauthenticated visitors on protected routes to /login', async () => {
+    setAccessToken(null)
+    renderWithProviders(<App />, { route: '/' })
 
-describe('App', () => {
-  it('shows that the API is connected when health succeeds', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ status: 'ok' }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        }),
-      ),
-    )
+    expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument()
+    expect(screen.queryByText(/foundation is ready/i)).not.toBeInTheDocument()
+  })
 
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    })
+  it('keeps public routes reachable without a session', async () => {
+    setAccessToken(null)
+    renderWithProviders(<App />, { route: '/register' })
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <MemoryRouter>
-          <App />
-        </MemoryRouter>
-      </QueryClientProvider>,
-    )
+    expect(await screen.findByRole('heading', { name: 'Create your account' })).toBeInTheDocument()
+  })
 
-    expect(await screen.findByText('ready', { selector: 'span' })).toBeInTheDocument()
+  it('serves the protected home once the session restores', async () => {
+    setAccessToken(mockAccessToken)
+    renderWithProviders(<App />, { route: '/' })
+
+    expect(await screen.findByText(mockUser.email)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Log out' })).toBeInTheDocument()
+  })
+
+  it('routes unknown paths through the route table instead of a demo catch-all', async () => {
+    setAccessToken(null)
+    renderWithProviders(<App />, { route: '/no-such-page' })
+
+    expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument()
   })
 })

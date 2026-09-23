@@ -1,5 +1,11 @@
 import { io } from 'socket.io-client'
-import { apiRequest } from './api-client.js'
+import {
+  getAccessToken,
+  getOrganizationId,
+  refreshAccessToken,
+  setAccessToken,
+  setOrganizationId,
+} from './api-client.js'
 
 // B15-T4 (#47): the browser end of push. One authenticated socket per page,
 // owned by the app shell via useRealtime — never constructed in pages.
@@ -26,33 +32,13 @@ export const CONNECTION_STATUS = Object.freeze({
   DISCONNECTED: 'disconnected',
 })
 
-// In-memory access token (server keeps it out of storage by decision —
-// tokens.js: short-lived JWT in browser memory, refresh via httpOnly cookie).
-// Fed by login/register/refresh responses; B18 wires the feed.
-let accessToken = null
-let organizationId = null
-
-export function setAccessToken(token) {
-  accessToken = token ?? null
-}
-
-export function getAccessToken() {
-  return accessToken
-}
-
-export function setOrganizationId(orgId) {
-  organizationId = orgId ?? null
-}
-
-// Single refresh per connection cycle: on auth failure refresh once and
-// retry; a second failure gives up instead of looping.
-export async function refreshAccessToken() {
-  const body = await apiRequest('/api/v1/auth/refresh', { method: 'POST' })
-  if (body?.accessToken) {
-    setAccessToken(body.accessToken)
-  }
-  return body?.accessToken ?? null
-}
+// The in-memory access token, the organization hint, and the single-flight
+// refresh live in api-client.js — one source of truth shared with the fetch
+// path (server keeps tokens out of storage by decision: short-lived JWT in
+// browser memory, refresh via httpOnly cookie). Re-exported here so
+// socket/auth consumers keep a stable import; the implementation is not
+// duplicated.
+export { getAccessToken, getOrganizationId, setAccessToken, setOrganizationId }
 
 const AUTH_ERROR_PATTERN = /expir|invalid.*token|unauthori|authentication/i
 
@@ -93,7 +79,9 @@ export function getSocket() {
 // the CURRENT token — a mid-session refresh is picked up without rebuilding
 // the socket.
 function currentAuth() {
-  return organizationId ? { token: accessToken, orgId: organizationId } : { token: accessToken }
+  const token = getAccessToken()
+  const organizationId = getOrganizationId()
+  return organizationId ? { token, orgId: organizationId } : { token }
 }
 
 export function connectSocket() {

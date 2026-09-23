@@ -135,7 +135,16 @@ signal is needed. Do not build policy association on this ticket.
 
 **Verdict:** B11 delayed `sla-check` timers carry no threshold promise and fail
 B12 strict parsing. Both the router and the handler recognize that shape and
-acknowledge it (`sla-legacy-noop` — no writes, no fan-out) instead of
-poisoning it onto the dead-letter path. Upgrade path: deploy freely — stale
-B11 timers drain harmlessly while every new assignment arms threshold
-payloads. No Redis drain or obliteration required.
+acknowledge it (`sla-legacy-noop` — no writes, no fan-out) instead of poisoning
+it onto the dead-letter path. Upgrade path: deploy freely — stale B11 timers
+drain harmlessly while every new assignment arms threshold payloads. No Redis
+drain or obliteration required.
+
+## DG-5 — Tailwind v4 theme config supersedes the plan's tailwind.config.js (resolved, B17)
+
+**Verdict:** `Dispatch_plan.md:1513` names `tailwind.config.js [NEW]` for
+content paths and theme tokens; that line is v3-era. Tailwind v4 is
+CSS-first: content paths (`@source`) and theme tokens (`@theme`) live in
+`client/src/index.css` and no `tailwind.config.js` is created. This entry
+supersedes that plan line; the plan file itself is left unchanged.
+Status: recorded; implementation follows the v4 form.
