@@ -1,19 +1,21 @@
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { useQuery } from '@tanstack/react-query'
+import { act, cleanup, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('socket.io-client', () => ({ io: vi.fn() }))
 
 import { apiRequest } from '../lib/api-client.js'
 import { REALTIME_EVENTS, disconnectSocket } from '../lib/socket-client.js'
+import { jobsBoard } from '../mocks/handlers.js'
+import { createTestQueryClient, renderWithProviders } from '../test/render.jsx'
 import { io } from 'socket.io-client'
 import { queryClient as appQueryClient } from '../query-client.js'
 import { POLLING_INTERVAL_MS, patchRealtimeCache, useRealtime } from './use-realtime.js'
 
 // B15-T5 (#48) disconnect drills in the T4 harness (mocked io, fake socket,
-// stubbed fetch as PostgreSQL truth): the socket-drop drill proves the banner
-// state, the polling cadence keeping data updating off PG truth, and the
-// exactly-once reconnect reconciliation; the missed-events drill proves a
+// MSW jobs handler as PostgreSQL truth): the socket-drop drill proves the
+// banner state, the polling cadence keeping data updating off PG truth, and
+// the exactly-once reconnect reconciliation; the missed-events drill proves a
 // whole dark window resolves after that single refresh; the movement drill
 // drives patchRealtimeCache directly and proves a burst stays fetch-free.
 //
@@ -21,7 +23,7 @@ import { POLLING_INTERVAL_MS, patchRealtimeCache, useRealtime } from './use-real
 // (TanStack observer notifications do not re-render under fake timers); the
 // 15s value itself is asserted as a constant equal to the query-client
 // staleTime, the T4 precedent. Job-correctness rides along: every rendered
-// board state is asserted exact against the stubbed PG truth.
+// board state is asserted exact against the MSW PG truth.
 
 function createFakeSocket() {
   const handlers = new Map()
@@ -42,17 +44,6 @@ function createFakeSocket() {
       }
     },
   }
-}
-
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function testClient() {
-  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
 }
 
 // The consumer contract B18 builds on: while the polling flag reads, the
@@ -95,7 +86,7 @@ beforeEach(() => {
 afterEach(() => {
   disconnectSocket()
   cleanup()
-  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('disconnect drills', () => {
@@ -105,16 +96,11 @@ describe('disconnect drills', () => {
   })
 
   it('socket-drop: banner state, polling keeps data updating, reconnect reconciles exactly once', async () => {
-    let pgTruth = [{ id: 'job-1', status: 'PENDING' }]
-    const fetch = vi.fn(async () => jsonResponse({ jobs: pgTruth }))
-    vi.stubGlobal('fetch', fetch)
-    const client = testClient()
+    jobsBoard.jobs = [{ id: 'job-1', status: 'PENDING' }]
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    const client = createTestQueryClient()
 
-    render(
-      <QueryClientProvider client={client}>
-        <Board client={client} intervalMs={100} />
-      </QueryClientProvider>,
-    )
+    renderWithProviders(<Board client={client} intervalMs={100} />, { queryClient: client })
 
     // Mount fetches once; the singleton starts disconnected so the banner and
     // the polling flag read at once.
@@ -131,7 +117,7 @@ describe('disconnect drills', () => {
     // Drop: banner back, and PostgreSQL moves on while we are dark.
     emit('disconnect', undefined)
     await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
-    pgTruth = [
+    jobsBoard.jobs = [
       { id: 'job-1', status: 'ASSIGNED' },
       { id: 'job-2', status: 'PENDING' },
     ]
@@ -153,16 +139,11 @@ describe('disconnect drills', () => {
   })
 
   it('missed events: a whole dark window resolves after the single reconnect refresh', async () => {
-    let pgTruth = [{ id: 'job-1', status: 'PENDING', title: 'Pump' }]
-    const fetch = vi.fn(async () => jsonResponse({ jobs: pgTruth }))
-    vi.stubGlobal('fetch', fetch)
-    const client = testClient()
+    jobsBoard.jobs = [{ id: 'job-1', status: 'PENDING', title: 'Pump' }]
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    const client = createTestQueryClient()
 
-    render(
-      <QueryClientProvider client={client}>
-        <Board client={client} intervalMs={60_000} />
-      </QueryClientProvider>,
-    )
+    renderWithProviders(<Board client={client} intervalMs={60_000} />, { queryClient: client })
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
 
     // Live session, then the drop. Push has no backlog — everything below is
@@ -170,7 +151,7 @@ describe('disconnect drills', () => {
     // never fire inside this fast drill, so any refresh is the reconcile).
     emit('connect', undefined)
     emit('disconnect', undefined)
-    pgTruth = [
+    jobsBoard.jobs = [
       { id: 'job-1', status: 'CANCELLED', title: 'Pump urgently' },
       { id: 'job-2', status: 'ASSIGNED', title: 'Valve' },
       { id: 'job-3', status: 'PENDING', title: 'Meter' },
@@ -191,9 +172,8 @@ describe('disconnect drills', () => {
   })
 
   it('movement: a burst of agent.moved patches the cache with zero REST fetches', () => {
-    const fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok' }))
-    vi.stubGlobal('fetch', fetch)
-    const client = testClient()
+    const fetch = vi.spyOn(globalThis, 'fetch')
+    const client = createTestQueryClient()
     client.setQueryData(['positions'], {
       'agent-1': { agentId: 'agent-1', latitude: 51.5, longitude: -0.12 },
     })

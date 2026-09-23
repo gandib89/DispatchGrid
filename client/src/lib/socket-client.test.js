@@ -1,7 +1,10 @@
+import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('socket.io-client', () => ({ io: vi.fn() }))
 
+import { mockAccessToken, mockUser } from '../mocks/handlers.js'
+import { server } from '../mocks/setup.js'
 import { io } from 'socket.io-client'
 import {
   connectSocket,
@@ -37,13 +40,6 @@ function createFakeSocket() {
   }
 }
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
 beforeEach(() => {
   vi.clearAllMocks()
   setAccessToken(null)
@@ -51,7 +47,7 @@ beforeEach(() => {
 
 afterEach(() => {
   disconnectSocket()
-  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('socket-client', () => {
@@ -75,10 +71,14 @@ describe('socket-client', () => {
   })
 
   it('refreshes once on auth failure then gives up instead of looping', async () => {
+    server.use(
+      http.post('*/api/v1/auth/refresh', () =>
+        HttpResponse.json({ user: mockUser, accessToken: mockAccessToken }),
+      ),
+    )
+    const fetch = vi.spyOn(globalThis, 'fetch')
     const fake = createFakeSocket()
     io.mockReturnValue(fake)
-    const fetch = vi.fn().mockResolvedValue(jsonResponse({ accessToken: 'fresh-token' }))
-    vi.stubGlobal('fetch', fetch)
     setAccessToken('expired-token')
     connectSocket()
 
@@ -88,7 +88,7 @@ describe('socket-client', () => {
     await vi.waitFor(() => expect(fake.connect).toHaveBeenCalledTimes(1))
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(fetch.mock.calls[0][0]).toContain('/api/v1/auth/refresh')
-    expect(getAccessToken()).toBe('fresh-token')
+    expect(getAccessToken()).toBe(mockAccessToken)
 
     fake.emitLocal('connect_error', new Error('Invalid or expired access token'))
     await Promise.resolve()
@@ -97,10 +97,9 @@ describe('socket-client', () => {
   })
 
   it('does not refresh on non-auth connection errors', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch')
     const fake = createFakeSocket()
     io.mockReturnValue(fake)
-    const fetch = vi.fn()
-    vi.stubGlobal('fetch', fetch)
     connectSocket()
 
     fake.emitLocal('connect_error', new Error('server went away'))
