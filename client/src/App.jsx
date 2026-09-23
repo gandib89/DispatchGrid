@@ -3,14 +3,8 @@ import { SessionProvider } from './auth/session.jsx'
 import { useSession } from './auth/session-context.js'
 import { AppShell } from './components/AppShell.jsx'
 import { ProtectedRoute } from './components/ProtectedRoute.jsx'
-
-function LoginPage() {
-  return <h1>Log in</h1>
-}
-
-function RegisterPage() {
-  return <h1>Create your account</h1>
-}
+import { LoginPage } from './pages/LoginPage.jsx'
+import { RegisterPage } from './pages/RegisterPage.jsx'
 
 function HomePage() {
   const { user, logout } = useSession()
