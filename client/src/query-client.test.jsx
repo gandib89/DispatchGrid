@@ -3,13 +3,7 @@ import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { apiRequest } from './lib/api-client.js'
 import { queryClient } from './query-client.js'
-
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
+import { jsonResponse } from './test/helpers.js'
 
 afterEach(() => {
   vi.unstubAllGlobals()

@@ -1,5 +1,11 @@
 import { io } from 'socket.io-client'
-import { getAccessToken, refreshAccessToken, setAccessToken } from './api-client.js'
+import {
+  getAccessToken,
+  getOrganizationId,
+  refreshAccessToken,
+  setAccessToken,
+  setOrganizationId,
+} from './api-client.js'
 
 // B15-T4 (#47): the browser end of push. One authenticated socket per page,
 // owned by the app shell via useRealtime — never constructed in pages.
@@ -26,18 +32,13 @@ export const CONNECTION_STATUS = Object.freeze({
   DISCONNECTED: 'disconnected',
 })
 
-// The in-memory access token and the single-flight refresh live in
-// api-client.js — one source of truth shared with the fetch path (server
-// keeps tokens out of storage by decision: short-lived JWT in browser
-// memory, refresh via httpOnly cookie). Re-exported here so socket/auth
-// consumers keep a stable import; the implementation is not duplicated.
-export { getAccessToken, setAccessToken }
-
-let organizationId = null
-
-export function setOrganizationId(orgId) {
-  organizationId = orgId ?? null
-}
+// The in-memory access token, the organization hint, and the single-flight
+// refresh live in api-client.js — one source of truth shared with the fetch
+// path (server keeps tokens out of storage by decision: short-lived JWT in
+// browser memory, refresh via httpOnly cookie). Re-exported here so
+// socket/auth consumers keep a stable import; the implementation is not
+// duplicated.
+export { getAccessToken, getOrganizationId, setAccessToken, setOrganizationId }
 
 const AUTH_ERROR_PATTERN = /expir|invalid.*token|unauthori|authentication/i
 
@@ -79,6 +80,7 @@ export function getSocket() {
 // the socket.
 function currentAuth() {
   const token = getAccessToken()
+  const organizationId = getOrganizationId()
   return organizationId ? { token, orgId: organizationId } : { token }
 }
 

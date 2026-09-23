@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiRequest, setAccessToken } from '../lib/api-client.js'
-import { setOrganizationId } from '../lib/socket-client.js'
+import { apiRequest, setAccessToken, setOrganizationId } from '../lib/api-client.js'
 import { SessionContext } from './session-context.js'
 
 const ANONYMOUS = { user: null, organizationId: null, roleName: null }
@@ -14,8 +13,8 @@ export function SessionProvider({ children }) {
     setState({ status: 'anonymous', ...ANONYMOUS })
   }, [])
 
-  // Org/role enrichment is best-effort: the session stands without it.
-  const enrich = useCallback(async (user) => {
+  // Org/role loading is best-effort: the session stands without it.
+  const loadOrganizationAndRole = useCallback(async (user) => {
     let organizationId = null
     let roleName = null
     try {
@@ -42,17 +41,17 @@ export function SessionProvider({ children }) {
       // 401 -> single-flight refresh -> replay path, so a lost in-memory
       // token is renewed here and a failed refresh surfaces as a 401.
       const user = await apiRequest('/api/v1/auth/me')
-      const { organizationId, roleName } = await enrich(user)
+      const { organizationId, roleName } = await loadOrganizationAndRole(user)
       setState({ status: 'authenticated', user, organizationId, roleName })
     } catch {
       // Refresh failure (or unreachable auth) during restore clears the
       // session and the single in-memory token.
       clearSession()
     }
-  }, [clearSession, enrich])
+  }, [clearSession, loadOrganizationAndRole])
 
   // Entry screens land the session through the same api client: token into
-  // memory, org/role enrichment, then the authenticated state.
+  // memory, org/role load, then the authenticated state.
   const establish = useCallback(
     async (path, body) => {
       const { user, accessToken } = await apiRequest(path, {
@@ -60,10 +59,10 @@ export function SessionProvider({ children }) {
         body: JSON.stringify(body),
       })
       setAccessToken(accessToken)
-      const { organizationId, roleName } = await enrich(user)
+      const { organizationId, roleName } = await loadOrganizationAndRole(user)
       setState({ status: 'authenticated', user, organizationId, roleName })
     },
-    [enrich],
+    [loadOrganizationAndRole],
   )
 
   const login = useCallback((credentials) => establish('/api/v1/auth/login', credentials), [establish])

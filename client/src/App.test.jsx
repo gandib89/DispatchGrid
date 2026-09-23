@@ -1,16 +1,9 @@
-import { cleanup, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { screen } from '@testing-library/react'
+import { describe, expect, it } from 'vitest'
 import App from './App.jsx'
 import { setAccessToken } from './lib/api-client.js'
-import { setOrganizationId } from './lib/socket-client.js'
 import { mockAccessToken, mockUser } from './mocks/handlers.js'
 import { renderWithProviders } from './test/render.jsx'
-
-afterEach(() => {
-  cleanup()
-  setAccessToken(null)
-  setOrganizationId(null)
-})
 
 describe('App routing', () => {
   it('redirects unauthenticated visitors on protected routes to /login', async () => {

@@ -1,10 +1,9 @@
-import { cleanup, screen } from '@testing-library/react'
+import { screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import App from '../App.jsx'
 import { getAccessToken, setAccessToken } from '../lib/api-client.js'
-import { setOrganizationId } from '../lib/socket-client.js'
 import { mockAccessToken, mockCredentials, mockUser } from '../mocks/handlers.js'
 import { server } from '../mocks/setup.js'
 import { renderWithProviders } from '../test/render.jsx'
@@ -21,12 +20,6 @@ beforeEach(() => {
       ),
     ),
   )
-})
-
-afterEach(() => {
-  cleanup()
-  setAccessToken(null)
-  setOrganizationId(null)
 })
 
 async function fillCredentials(user, email, password) {

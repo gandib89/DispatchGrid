@@ -2,18 +2,18 @@ import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiRequest, getAccessToken, setAccessToken } from './api-client.js'
+import { jsonResponse } from '../test/helpers.js'
+import {
+  ApiError,
+  apiRequest,
+  getAccessToken,
+  setAccessToken,
+  setOrganizationId,
+} from './api-client.js'
 import {
   getAccessToken as socketGetAccessToken,
   setAccessToken as socketSetAccessToken,
 } from './socket-client.js'
-
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
 
 function unauthorizedResponse(message = 'Token expired') {
   return jsonResponse({ error: { code: 'unauthorized', message } }, 401)
@@ -33,6 +33,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setAccessToken(null)
+  setOrganizationId(null)
   vi.unstubAllGlobals()
 })
 
@@ -55,6 +56,24 @@ describe('access token', () => {
     expect(socketGetAccessToken).toBe(getAccessToken)
     socketSetAccessToken('from-socket')
     expect(getAccessToken()).toBe('from-socket')
+  })
+})
+
+describe('organization header', () => {
+  it('attaches x-organization-id when an organization is set and omits it when not', async () => {
+    const fetch = vi.fn(async () => jsonResponse({ jobs: [] }))
+    vi.stubGlobal('fetch', fetch)
+
+    await apiRequest('/api/v1/jobs')
+    expect(headerOf(fetch.mock.calls[0], 'x-organization-id')).toBeNull()
+
+    setOrganizationId('org-1')
+    await apiRequest('/api/v1/jobs')
+    expect(headerOf(fetch.mock.calls[1], 'x-organization-id')).toBe('org-1')
+
+    setOrganizationId(null)
+    await apiRequest('/api/v1/jobs')
+    expect(headerOf(fetch.mock.calls[2], 'x-organization-id')).toBeNull()
   })
 })
 
@@ -168,6 +187,18 @@ describe('idempotency keys', () => {
     expect(keys[3]).toBeTruthy()
     expect(keys[2]).not.toBe(keys[3])
     expect(keys[2]).not.toBe('logical-op-1')
+  })
+
+  it('sends the identical Idempotency-Key from the explicit idempotencyKey option across separate calls', async () => {
+    const fetch = vi.fn(async () => jsonResponse({ id: 'job-1' }))
+    vi.stubGlobal('fetch', fetch)
+
+    const mutation = { method: 'POST', body: '{"title":"Pump"}', idempotencyKey: 'logical-op-7' }
+    await apiRequest('/api/v1/jobs', mutation)
+    await apiRequest('/api/v1/jobs', mutation)
+
+    const keys = fetch.mock.calls.map((call) => headerOf(call, 'idempotency-key'))
+    expect(keys).toEqual(['logical-op-7', 'logical-op-7'])
   })
 
   it('does not attach a key to reads', async () => {

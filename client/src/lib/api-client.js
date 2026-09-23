@@ -26,6 +26,20 @@ export function getAccessToken() {
   return accessToken
 }
 
+// The organization hint, likewise shared: the session feeds it alongside
+// the token, apiRequest attaches it as `x-organization-id` (server reads
+// that header in server/src/middleware/resolve-tenant.js), and the socket
+// handshake sends it as `auth.orgId`.
+let organizationId = null
+
+export function setOrganizationId(orgId) {
+  organizationId = orgId ?? null
+}
+
+export function getOrganizationId() {
+  return organizationId
+}
+
 // Single-flight refresh: every concurrent 401 (and socket auth failure)
 // awaits the same in-flight POST; the slot clears once settled.
 let refreshInFlight = null
@@ -75,9 +89,14 @@ export async function apiRequest(path, options = {}) {
     headers.set('content-type', 'application/json')
   }
 
-  // One key per logical mutation: generated here when absent, reused by the
-  // 401 replay below (same Headers object), and kept stable across client
-  // retries when the caller passes its Idempotency-Key back in.
+  // One key per logical mutation, stable across client and network retries
+  // (#51): a caller retrying the same logical mutation passes the same
+  // `idempotencyKey` (equivalent to sending the Idempotency-Key header) on
+  // every attempt; the 401 replay below reuses this same Headers object.
+  // When neither is provided, a fresh key is generated per call.
+  if (options.idempotencyKey && !headers.has('Idempotency-Key')) {
+    headers.set('Idempotency-Key', options.idempotencyKey)
+  }
   const method = (options.method ?? 'GET').toUpperCase()
   if (MUTATING_METHODS.has(method) && !headers.has('Idempotency-Key')) {
     headers.set('Idempotency-Key', crypto.randomUUID())
@@ -87,6 +106,9 @@ export async function apiRequest(path, options = {}) {
     const token = getAccessToken()
     if (token) headers.set('authorization', `Bearer ${token}`)
     else headers.delete('authorization')
+    const orgId = getOrganizationId()
+    if (orgId) headers.set('x-organization-id', orgId)
+    else headers.delete('x-organization-id')
     return fetch(`${API_ORIGIN}${path}`, {
       ...options,
       headers,
