@@ -34,6 +34,21 @@ export const idempotencyInProgress = createHttpError(
   'idempotency_in_progress',
   'The same idempotent request is still running',
 )
+export const attachmentLimitReached = createHttpError(
+  409,
+  'attachment_limit_reached',
+  'The job already has the maximum number of attachments',
+)
+export const fileTooLarge = createHttpError(
+  413,
+  'file_too_large',
+  'The declared file size exceeds the allowed maximum',
+)
+export const unsupportedMediaType = createHttpError(
+  415,
+  'unsupported_media_type',
+  'The content type is not allowed for proof uploads',
+)
 export const invalidTransition = createHttpError(
   422,
   'invalid_transition',
