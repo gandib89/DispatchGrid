@@ -34,3 +34,17 @@ export function serializeMembership(membership) {
     updatedAt: toIso(membership.updatedAt),
   }
 }
+
+// Never includes the token or its hash: the plaintext exists only in the
+// issue return value and the queue payload; the hash never leaves PostgreSQL.
+export function serializeInvitation(invitation) {
+  return {
+    id: invitation.id,
+    organizationId: invitation.organizationId,
+    email: invitation.email,
+    expiresAt: toIso(invitation.expiresAt),
+    acceptedAt: toIso(invitation.acceptedAt),
+    createdAt: toIso(invitation.createdAt),
+    updatedAt: toIso(invitation.updatedAt),
+  }
+}
