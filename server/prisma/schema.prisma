@@ -67,6 +67,7 @@ model Organization {
   escalations             Escalation[]
   locationPings           LocationPing[]
   attachments             Attachment[]
+  invitations             Invitation[]
 
   @@index([createdAt])
 }
@@ -312,6 +313,18 @@ model Attachment {
 
   @@unique([organizationId, fileKey])
   @@index([organizationId, jobId, createdAt])
+}
+
+model Invitation {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  email          String       @db.Citext
+  tokenHash      String       @unique @db.VarChar(128)
+  expiresAt      DateTime     @db.Timestamptz(6)
+  acceptedAt     DateTime?    @db.Timestamptz(6)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 }
 
 model LocationPing {

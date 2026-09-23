@@ -3,18 +3,25 @@ import { z } from 'zod'
 import crypto from 'node:crypto'
 import { prisma } from '../db/client.js'
 import { authenticate } from '../middleware/authenticate.js'
-import { authorize } from '../middleware/authorize.js'
+import { actorFrom, authorize } from '../middleware/authorize.js'
 import { resolveTenant } from '../middleware/resolve-tenant.js'
 import { auditLog } from '../middleware/audit-log.js'
 import { notFound, badRequest } from '../errors/http-errors.js'
+import { getRequestContext } from '../lib/request-context.js'
 import { organizationSchemas } from '../../../shared/organization-schema.js'
+import { invitationSchemas } from '../../../shared/invitation-schema.js'
+import { issueInvitation, revokeInvitation } from '../services/invitation-service.js'
+import { enqueueInviteDelivery } from '../lib/queue/index.js'
+import { recordEnqueueFailure } from '../lib/queue/metrics.js'
 import {
   serializeOrganization,
   serializeMembership,
+  serializeInvitation,
 } from '../serializers/organization-serializer.js'
 
 const router = Router()
 const schemas = organizationSchemas(z)
+const inviteSchemas = invitationSchemas(z)
 
 function slugify(value) {
   const base = (value || 'organization')
@@ -203,6 +210,83 @@ router.patch(
         resourceId: updated.id,
       }
       res.json({ member: serializeMembership(updated) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Issue a pending invitation (B16-T3). The plaintext token never reaches the
+// response — it travels only in the after-commit delivery enqueue, and a
+// failed enqueue is warned and metered while the committed invitation stands.
+router.post(
+  '/:orgId/invitations',
+  authenticate,
+  resolveTenant(),
+  authorize('org.invite'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      schemas.organizationIdParamsSchema.parse(req.params)
+      const input = inviteSchemas.issueInvitationSchema.parse(req.body)
+      const actor = actorFrom(req)
+
+      const { invitation, token } = await issueInvitation(actor, input)
+
+      const requestId = req.id ?? getRequestContext()?.requestId ?? crypto.randomUUID()
+      try {
+        await enqueueInviteDelivery({
+          type: 'invite-delivery',
+          invitationId: invitation.id,
+          organizationId: invitation.organizationId,
+          email: invitation.email,
+          token,
+          expiresAt: invitation.expiresAt.toISOString(),
+          requestId,
+        })
+      } catch (error) {
+        recordEnqueueFailure()
+        req.log?.warn?.(
+          { error, invitationId: invitation.id, requestId },
+          'Invite delivery enqueue failed',
+        )
+      }
+
+      req.auditEntry = {
+        action: 'POST /organizations/:orgId/invitations',
+        resourceType: 'invitation',
+        resourceId: invitation.id,
+      }
+      res.status(201).json({ invitation: serializeInvitation(invitation) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// Revoke hard-deletes a pending invitation; accepted reads 409 and unknown
+// or cross-organization ids read 404, never 403.
+router.delete(
+  '/:orgId/invitations/:invitationId',
+  authenticate,
+  resolveTenant(),
+  authorize('org.invite'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = inviteSchemas.invitationIdParamsSchema.parse(req.params)
+      const actor = actorFrom(req)
+
+      const { invitation } = await revokeInvitation(actor, {
+        invitationId: params.invitationId,
+      })
+
+      req.auditEntry = {
+        action: 'DELETE /organizations/:orgId/invitations/:invitationId',
+        resourceType: 'invitation',
+        resourceId: invitation.id,
+      }
+      res.json({ invitation: serializeInvitation(invitation) })
     } catch (error) {
       next(error)
     }
