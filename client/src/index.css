@@ -1,5 +1,19 @@
 @import "tailwindcss";
 
+@source "./**/*.{js,jsx}";
+
+@theme {
+  --color-primary: #38bdf8;
+  --color-surface: #0f172a;
+  --color-edge: #1e293b;
+  --color-muted: #94a3b8;
+  --color-success: #4ade80;
+  --color-danger: #f87171;
+  --spacing-gutter: 1rem;
+  --radius-card: 0.75rem;
+  --radius-toast: 0.5rem;
+}
+
 :root {
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
