@@ -18,6 +18,10 @@ export const JOB_PRIORITIES = Object.freeze(['LOW', 'NORMAL', 'HIGH', 'URGENT'])
 
 export const JOB_SLA_STATES = Object.freeze(['OK', 'WARNING', 'BREACHED'])
 
+export const PROOF_CONTENT_TYPES = Object.freeze(['image/jpeg', 'image/png', 'image/webp'])
+
+export const PROOF_MAX_SIZE_BYTES = 5 * 1024 * 1024
+
 export function jobSchemas(z) {
   const createJobSchema = z
     .object({
@@ -106,6 +110,13 @@ export function jobSchemas(z) {
     })
     .strict()
 
+  const proofUploadSchema = z
+    .object({
+      contentType: z.string().min(1).max(128),
+      sizeBytes: z.number().int().min(1),
+    })
+    .strict()
+
   return {
     createJobSchema,
     jobIdParamsSchema,
@@ -116,5 +127,6 @@ export function jobSchemas(z) {
     completeJobSchema,
     cancelJobSchema,
     failJobSchema,
+    proofUploadSchema,
   }
 }

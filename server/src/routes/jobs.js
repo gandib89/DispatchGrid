@@ -10,9 +10,16 @@ import { getRequestContext } from '../lib/request-context.js'
 import { jobSchemas } from '../../../shared/job-schema.js'
 import { cancelJob, completeJob, createJob, failJob, patchJob, startJob } from '../services/job-service.js'
 import { acceptJob, assignJob, declineJob } from '../services/assignment-service.js'
+import { issueUploadUrl } from '../services/attachment-service.js'
 import { suggestAgents } from '../services/suggestion-service.js'
 import { scopedJob } from '../services/transaction.js'
-import { serializeAssignment, serializeEvent, serializeJob } from '../serializers/job-serializer.js'
+import {
+  serializeAssignment,
+  serializeAttachment,
+  serializeEvent,
+  serializeJob,
+  serializeUpload,
+} from '../serializers/job-serializer.js'
 import { afterJobCommit as runPostCommitHooks, scheduleSlaAfterAssign } from '../lib/integration-adapters.js'
 import { REALTIME_EVENTS, publishToOrg } from '../lib/realtime/socket-server.js'
 import { removePendingSlaEvaluations } from '../lib/queue/index.js'
@@ -417,6 +424,42 @@ router.post(
         resourceId: job.id,
       }
       res.json({ job: serializeJob(job) })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+// B16-T1: proof-photo upload URL. Records the durable Attachment row and
+// returns a five-minute conditional PUT; image bytes never pass through the
+// API. Same pipeline as the transitions above.
+router.post(
+  '/:id/upload-url',
+  authenticate,
+  resolveTenant(),
+  authorize('job.respond'),
+  auditLog,
+  async (req, res, next) => {
+    try {
+      const params = schemas.jobIdParamsSchema.parse(req.params)
+      const input = schemas.proofUploadSchema.parse(req.body)
+      const actor = actorFrom(req)
+      const { attachment, upload, replay } = await issueUploadUrl(actor, params.id, input, {
+        key: idempotencyKeyFrom(req),
+      })
+      if (replay) {
+        req.idempotentReplay = true
+        res.set('Idempotent-Replay', 'true')
+      }
+      req.auditEntry = {
+        action: 'POST /jobs/:id/upload-url',
+        resourceType: 'attachment',
+        resourceId: attachment.id,
+      }
+      res.status(201).json({
+        attachment: serializeAttachment(attachment),
+        upload: serializeUpload(upload),
+      })
     } catch (error) {
       next(error)
     }

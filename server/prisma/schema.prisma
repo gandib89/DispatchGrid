@@ -66,6 +66,8 @@ model Organization {
   slaPolicies             SlaPolicy[]
   escalations             Escalation[]
   locationPings           LocationPing[]
+  attachments             Attachment[]
+  invitations             Invitation[]
 
   @@index([createdAt])
 }
@@ -80,6 +82,7 @@ model User {
   memberships   Membership[]
   refreshTokens RefreshToken[]
   auditLogs     AuditLog[]
+  attachments   Attachment[]
 }
 
 model Membership {
@@ -224,11 +227,12 @@ model Job {
   completedAt       DateTime?    @db.Timestamptz(6)
   createdAt         DateTime     @default(now()) @db.Timestamptz(6)
   updatedAt         DateTime     @updatedAt @db.Timestamptz(6)
-  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   assignments       Assignment[]
   events            JobEvent[]
   escalations       Escalation[]
   locationPings     LocationPing[]
+  attachments       Attachment[]
 
   @@unique([organizationId, reference])
   @@index([organizationId, status, priority, dueAt])
@@ -291,6 +295,36 @@ model Escalation {
 
   @@unique([jobId, threshold])
   @@index([organizationId, jobId, createdAt])
+}
+
+model Attachment {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  jobId          String       @db.Uuid
+  uploaderId     String       @db.Uuid
+  fileKey        String       @db.VarChar(512)
+  contentType    String       @db.VarChar(128)
+  sizeBytes      Int
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  job            Job          @relation(fields: [jobId], references: [id], onDelete: Restrict)
+  uploader       User         @relation(fields: [uploaderId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, fileKey])
+  @@index([organizationId, jobId, createdAt])
+}
+
+model Invitation {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @db.Uuid
+  email          String       @db.Citext
+  tokenHash      String       @unique @db.VarChar(128)
+  expiresAt      DateTime     @db.Timestamptz(6)
+  acceptedAt     DateTime?    @db.Timestamptz(6)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(6)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
 }
 
 model LocationPing {

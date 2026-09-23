@@ -56,3 +56,29 @@ export function serializeEvent(event) {
     createdAt: toIso(event.createdAt),
   }
 }
+
+export function serializeAttachment(attachment) {
+  return {
+    id: attachment.id,
+    organizationId: attachment.organizationId,
+    jobId: attachment.jobId,
+    uploaderId: attachment.uploaderId,
+    fileKey: attachment.fileKey,
+    contentType: attachment.contentType,
+    sizeBytes: attachment.sizeBytes,
+    createdAt: toIso(attachment.createdAt),
+    updatedAt: toIso(attachment.updatedAt),
+  }
+}
+
+export function serializeUpload(upload) {
+  return {
+    method: upload.method,
+    url: upload.url,
+    expiresAt: toIso(upload.expiresAt),
+    conditions: {
+      contentType: upload.conditions.contentType,
+      sizeBytes: upload.conditions.sizeBytes,
+    },
+  }
+}

@@ -8,7 +8,7 @@
 // whole ORM records: every payload carries IDs, the organization ID, a type,
 // and the originating request ID so async work traces back to its HTTP cause.
 
-export const QUEUE_MESSAGE_TYPES = Object.freeze(['job-event', 'sla-check'])
+export const QUEUE_MESSAGE_TYPES = Object.freeze(['job-event', 'sla-check', 'invite-delivery'])
 
 // Threshold vocabulary for delayed evaluation (B12): WARNING fires before the
 // deadline, BREACH at/after it. Mirrors the Escalation threshold enum so the
@@ -46,14 +46,29 @@ export function queueSchemas(z) {
     })
     .strict()
 
+  // Invite delivery (B16-T3): the only place the plaintext token travels —
+  // PostgreSQL stores the SHA-256 hash only, and no HTTP response carries it.
+  // The worker re-reads the durable invitation before acknowledging.
+  const inviteDeliveryPayloadSchema = basePayloadSchema
+    .extend({
+      type: z.literal('invite-delivery'),
+      invitationId: z.string().uuid(),
+      email: z.string().email(),
+      token: z.string().min(1).max(128),
+      expiresAt: z.string().datetime(),
+    })
+    .strict()
+
   const queuePayloadSchema = z.discriminatedUnion('type', [
     jobEventPayloadSchema,
     slaCheckPayloadSchema,
+    inviteDeliveryPayloadSchema,
   ])
 
   return {
     jobEventPayloadSchema,
     slaCheckPayloadSchema,
+    inviteDeliveryPayloadSchema,
     queuePayloadSchema,
   }
 }

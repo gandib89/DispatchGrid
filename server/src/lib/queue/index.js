@@ -75,6 +75,20 @@ export async function enqueueJobEvent(payload, options = {}) {
   return job
 }
 
+// After-commit-only: hand the plaintext invite token to the delivery stub
+// (B16-T3). The token exists only in the issue return value and this payload —
+// PostgreSQL stores the SHA-256 hash, and no HTTP response carries it.
+export async function enqueueInviteDelivery(payload, options = {}) {
+  const data = schemas.inviteDeliveryPayloadSchema.parse(payload)
+  const queue = getQueue(QUEUE_NAMES.jobEvents)
+  const job = await queue.add(data.type, data, options)
+  logger.info(
+    { queue: QUEUE_NAMES.jobEvents, invitationId: data.invitationId, requestId: data.requestId },
+    'Enqueued invite delivery',
+  )
+  return job
+}
+
 // After-commit-only: schedule a delayed threshold evaluation (DG-4).
 // The BullMQ identity is deterministic per job and threshold, so re-adding
 // the same threshold collapses onto the one pending evaluation instead of
